@@ -15,6 +15,15 @@ jobs:
       - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
+      - name: Check the tag matches the workspace version
+        shell: bash
+        run: |
+          version=$(bash scripts/package.sh --print-version)
+          if [[ "$GITHUB_REF_NAME" != "v$version" ]]; then
+            printf 'Tag %s does not match version %s in Cargo.toml. Bump the version, then tag v%s.\n' \
+              "$GITHUB_REF_NAME" "$version" "$version" >&2
+            exit 1
+          fi
       - uses: Swatinem/rust-cache@v2.9.3
       - name: Ensure Inno Setup 6 is available
         shell: bash

@@ -3041,7 +3041,7 @@ dependencies = [
 
 [[package]]
 name = "tempora"
-version = "0.1.0"
+version = "0.2.1"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -3056,7 +3056,7 @@ dependencies = [
 
 [[package]]
 name = "tempora-dashboard"
-version = "0.1.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3075,7 +3075,7 @@ dependencies = [
 
 [[package]]
 name = "tempora-recorder"
-version = "0.1.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "tempora",
