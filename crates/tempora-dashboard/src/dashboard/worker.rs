@@ -84,7 +84,7 @@ pub(super) enum Update {
 
 #[derive(Clone, Copy, PartialEq)]
 pub(super) enum ControlKind {
-    Correction,
+    Correction(Option<u64>),
     Undo,
     Settings,
     Other,
@@ -93,11 +93,11 @@ pub(super) enum ControlKind {
 impl ControlKind {
     fn of(request: &ControlRequest) -> Self {
         match request {
-            ControlRequest::EditApp { .. }
-            | ControlRequest::GroupApps { .. }
-            | ControlRequest::ResetApp { .. }
-            | ControlRequest::UngroupApp { .. } => Self::Correction,
-            ControlRequest::UndoCorrection => Self::Undo,
+            ControlRequest::TrackCorrection { token, .. } => Self::Correction(Some(*token)),
+            request if request.is_app_correction() => Self::Correction(None),
+            ControlRequest::UndoCorrection | ControlRequest::UndoTrackedCorrection { .. } => {
+                Self::Undo
+            }
             ControlRequest::SetSettings(_) => Self::Settings,
             _ => Self::Other,
         }

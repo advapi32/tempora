@@ -216,20 +216,19 @@ impl Dashboard {
             widgets::kpi_grid(ui, &kpis, if wide { 5 } else { 3 });
         }
         let online = self.recorder_online() && !self.pending;
-        let ungroup_blocked = if !self.recorder_online() {
-            Some("The recorder isn't running")
-        } else if !self.recorder_can(CAPABILITY_UNGROUP_APP) {
-            Some("Update the recorder to use this")
-        } else {
-            None
+        let correction_blocked = |capability| {
+            if !self.recorder_online() {
+                Some("The recorder isn't running")
+            } else if !self.recorder_can(capability) {
+                Some("Update the recorder to use this")
+            } else if self.pending {
+                Some("Wait for the current recorder action to finish")
+            } else {
+                None
+            }
         };
-        let reset_blocked = if !self.recorder_online() {
-            Some("The recorder isn't running")
-        } else if !self.recorder_can(CAPABILITY_RESET_APP) {
-            Some("Update the recorder to use this")
-        } else {
-            None
-        };
+        let ungroup_blocked = correction_blocked(CAPABILITY_UNGROUP_APP);
+        let reset_blocked = correction_blocked(CAPABILITY_RESET_APP);
         let range_label = format::range_label(self.nav.view.range, self.nav.view.period);
         let main = |ui: &mut Ui, this: &mut Self| -> Option<DetailAction> {
             match &vm.range {
@@ -336,10 +335,15 @@ impl Dashboard {
 
     fn detail_header(&mut self, ui: &mut Ui, vm: &DetailVm) -> Option<DetailAction> {
         let mut action = None;
-        let running = self
-            .recorder
-            .iter()
-            .any(|status| status.candidates.iter().any(|app| app.key == vm.key));
+        let running = self.recorder.as_ref().is_some_and(|status| {
+            status.candidates.iter().any(|app| {
+                app.key == vm.key
+                    || vm
+                        .identity
+                        .as_ref()
+                        .is_some_and(|identity| identity.sources.contains(&app.key))
+            })
+        });
         let width = ui.available_width();
         ui.allocate_ui_with_layout(
             vec2(width, 56.0),

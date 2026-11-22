@@ -179,7 +179,7 @@ pub(in crate::dashboard) fn toast(
     id: egui::Id,
     message: &str,
     error: bool,
-    undo: bool,
+    undo: Option<&str>,
 ) -> Option<ToastAction> {
     const INSET: f32 = 20.0;
     let mut result = None;
@@ -196,7 +196,7 @@ pub(in crate::dashboard) fn toast_body(
     ui: &mut Ui,
     message: &str,
     error: bool,
-    undo: bool,
+    undo: Option<&str>,
 ) -> Option<ToastAction> {
     let colors = Tokens::get(ui);
     let (icon, color) = if error {
@@ -204,10 +204,10 @@ pub(in crate::dashboard) fn toast_body(
     } else {
         (icons::CHECK_CIRCLE, colors.ok)
     };
-    let undo_button = Button {
+    let undo_button = undo.map(|label| Button {
         size: ButtonSize::Small,
-        ..Button::new("Undo", ButtonKind::Secondary)
-    };
+        ..Button::new(label, ButtonKind::Secondary)
+    });
     let close_button = Button {
         size: ButtonSize::Small,
         icon: Some(icons::X),
@@ -226,11 +226,9 @@ pub(in crate::dashboard) fn toast_body(
             let gap = 14.0;
             let actions_width = close_button.width(ui)
                 + gap
-                + if undo {
-                    undo_button.width(ui) + gap
-                } else {
-                    0.0
-                };
+                + undo_button
+                    .as_ref()
+                    .map_or(0.0, |button| button.width(ui) + gap);
             let icon_width = Tokens::ICON_SIZE + gap;
             let max_text_width =
                 (ui.available_width() - icon_width - actions_width).clamp(0.0, 250.0);
@@ -251,7 +249,7 @@ pub(in crate::dashboard) fn toast_body(
                     ui.spacing_mut().item_spacing.x = gap;
                     glyph(ui, icon, Tokens::ICON_SIZE, color);
                     ui.label(text).on_hover_text(message);
-                    let undo = undo && ui.add(undo_button).clicked();
+                    let undo = undo_button.is_some_and(|button| ui.add(button).clicked());
                     let close = ui.add(close_button).clicked();
                     if undo {
                         Some(ToastAction::Undo)

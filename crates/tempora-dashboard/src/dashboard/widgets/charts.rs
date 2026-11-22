@@ -38,13 +38,13 @@ pub(in crate::dashboard) struct StackedBar {
     pub today: bool,
     /// Days after today draw an empty placeholder and are not clickable.
     pub future: bool,
-    /// The second line of a slice's tooltip, naming where the slice sits (the day). Without
-    /// it the bar keeps the plain `description` tooltip.
+    /// The day shown next to the total in each slice's tooltip. Without it the bar uses
+    /// the plain `description` tooltip.
     pub slice_detail: Option<String>,
 }
 
-/// A slice's tooltip: its swatch, series and duration, with the day underneath.
-fn slice_tip(ui: &mut Ui, segment: &Segment, detail: &str) {
+/// A slice's tooltip: its swatch, series and duration, with the day and bar total underneath.
+fn slice_tip(ui: &mut Ui, segment: &Segment, day: &str, total: i64) {
     let colors = Tokens::get(ui);
     // Tooltip rows size to their text, not to the app's 36 px control height.
     ui.spacing_mut().interact_size.y = 0.0;
@@ -64,9 +64,12 @@ fn slice_tip(ui: &mut Ui, segment: &Segment, detail: &str) {
         );
     });
     ui.label(
-        eframe::egui::RichText::new(detail)
-            .size(Tokens::CAPTION)
-            .color(colors.fg_subtle),
+        eframe::egui::RichText::new(format!(
+            "{day} · {} total",
+            crate::dashboard::format::duration(total)
+        ))
+        .size(Tokens::CAPTION)
+        .color(colors.fg_subtle),
     );
 }
 
@@ -209,8 +212,7 @@ pub(in crate::dashboard) fn stacked_bars(
         }
         if let Some(mut response) = response {
             match (&bar.slice_detail, slice) {
-                // Shown at once: the chart is read by moving across its slices. Between
-                // slices there is no tooltip: the total above the bar already says it.
+                // Show the tooltip immediately so readers can move across the slices.
                 (Some(detail), Some(slice)) => {
                     eframe::egui::Tooltip::always_open(
                         ui.ctx().clone(),
@@ -219,7 +221,7 @@ pub(in crate::dashboard) fn stacked_bars(
                         eframe::egui::PopupAnchor::Pointer,
                     )
                     .gap(14.0)
-                    .show(|ui| slice_tip(ui, &bar.segments[slice], detail));
+                    .show(|ui| slice_tip(ui, &bar.segments[slice], detail, total));
                 }
                 (Some(_), None) => {}
                 (None, _) => response = response.on_hover_text(&bar.description),

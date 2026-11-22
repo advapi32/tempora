@@ -125,7 +125,7 @@ impl Samples {
             );
         });
         self.feedback(ui);
-        widgets::toast_body(ui, "App updated", false, true);
+        widgets::toast_body(ui, "App updated", false, Some("Undo"));
         self.open_surfaces(ui);
         examples_table(ui);
         chart_examples(ui, self.period != 1);

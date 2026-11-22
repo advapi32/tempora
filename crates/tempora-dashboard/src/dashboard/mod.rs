@@ -15,7 +15,8 @@ mod widgets;
 pub(super) mod window_geometry;
 mod worker;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, hash_map::RandomState};
+use std::hash::BuildHasher;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
@@ -24,7 +25,9 @@ use chrono::{Local, NaiveDate};
 use chrono_tz::Tz;
 use eframe::egui;
 use tempora::{
-    model::{AppIdentity, ControlRequest, DateRange, RecorderStatus, Settings},
+    model::{
+        AppIdentity, CAPABILITY_TRACKED_UNDO, ControlRequest, DateRange, RecorderStatus, Settings,
+    },
     storage::Report,
 };
 
@@ -119,14 +122,14 @@ impl<K: Clone + PartialEq, V> Cached<K, V> {
 pub(super) struct Toast {
     pub message: String,
     pub error: bool,
-    pub undo: bool,
+    pub undo: Option<&'static str>,
     pub shown: Instant,
 }
 
 impl Toast {
     /// Toasts fade on their own; ones that offer Undo or report an error stay longer.
     pub fn lifetime(&self) -> Duration {
-        if self.undo || self.error {
+        if self.undo.is_some() || self.error {
             Duration::from_secs(8)
         } else {
             Duration::from_secs(4)
@@ -152,8 +155,8 @@ pub(super) struct Dashboard {
     settings_dirty: bool,
     recorder_error: Option<tempora::pipe::RequestError>,
     toast: Option<Toast>,
-    /// A correction made in this session can be undone with Ctrl+Z.
-    undo_ready: bool,
+    /// Corrections made by this dashboard. Older recorders support one legacy undo (None).
+    undo_stack: Vec<Option<u64>>,
     pending: bool,
     status_pending: bool,
     /// Status requests that failed in a row while the recorder was last known online.
@@ -228,7 +231,7 @@ impl Dashboard {
             settings_dirty: false,
             recorder_error: None,
             toast: None,
-            undo_ready: false,
+            undo_stack: Vec::new(),
             pending: false,
             status_pending: false,
             status_failures: 0,
@@ -273,7 +276,7 @@ impl Dashboard {
         self.toast = Some(Toast {
             message: message.into(),
             error,
-            undo: false,
+            undo: None,
             shown: Instant::now(),
         });
     }
@@ -354,6 +357,17 @@ impl Dashboard {
     }
 
     fn action(&mut self, command: ControlRequest, success: &'static str) {
+        if matches!(command, ControlRequest::DeleteHistory { .. }) {
+            self.undo_stack.clear();
+        }
+        let command = if command.is_app_correction() && self.recorder_can(CAPABILITY_TRACKED_UNDO) {
+            ControlRequest::TrackCorrection {
+                token: RandomState::new().hash_one(()),
+                command: Box::new(command),
+            }
+        } else {
+            command
+        };
         self.pending = true;
         self.send(Job::Control(command, success));
     }
@@ -369,10 +383,16 @@ impl Dashboard {
     }
 
     fn undo(&mut self) {
-        if self.recorder_online() && !self.pending {
-            self.toast = None;
-            self.action(ControlRequest::UndoCorrection, "Change undone");
+        if !self.recorder_online() || self.pending {
+            return;
         }
+        let command = match self.undo_stack.last() {
+            Some(Some(token)) => ControlRequest::UndoTrackedCorrection { token: *token },
+            Some(None) => ControlRequest::UndoCorrection,
+            None => return,
+        };
+        self.toast = None;
+        self.action(command, "Change undone");
     }
 
     fn receive(&mut self, ctx: &egui::Context) {
@@ -444,27 +464,42 @@ impl Dashboard {
                     self.pending = false;
                     match result {
                         Ok(message) => {
-                            if kind == ControlKind::Settings {
-                                self.settings_dirty = false;
-                            }
+                            let undo = match kind {
+                                ControlKind::Correction(token) => {
+                                    if token.is_none() {
+                                        self.undo_stack.clear();
+                                    }
+                                    self.undo_stack.push(token);
+                                    Some("Undo")
+                                }
+                                ControlKind::Undo => {
+                                    self.undo_stack.pop();
+                                    (!self.undo_stack.is_empty()).then_some("Undo previous")
+                                }
+                                ControlKind::Settings => {
+                                    self.settings_dirty = false;
+                                    None
+                                }
+                                ControlKind::Other => None,
+                            };
                             self.toast = Some(Toast {
                                 message: message.into(),
                                 error: false,
-                                undo: kind == ControlKind::Correction,
+                                undo,
                                 shown: Instant::now(),
                             });
-                            match kind {
-                                ControlKind::Correction => self.undo_ready = true,
-                                ControlKind::Undo => self.undo_ready = false,
-                                _ => {}
-                            }
-                            if matches!(kind, ControlKind::Correction | ControlKind::Undo) {
+                            if matches!(kind, ControlKind::Correction(_) | ControlKind::Undo) {
                                 self.infos.clear();
                                 icons::clear(ctx);
                             }
                             self.refresh();
                         }
-                        Err(error) => self.notify(error, true),
+                        Err(error) => {
+                            if kind == ControlKind::Undo {
+                                self.undo_stack.clear();
+                            }
+                            self.notify(error, true);
+                        }
                     }
                 }
                 Update::Exported(result) => {
@@ -526,9 +561,8 @@ impl Dashboard {
         if self.dialog.is_some() || self.popup.is_some() {
             return;
         }
-        let typing = ctx.egui_wants_keyboard_input();
-        if !typing
-            && self.undo_ready
+        if !ctx.text_edit_focused()
+            && !self.undo_stack.is_empty()
             && ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::Z))
         {
             self.undo();
@@ -587,6 +621,87 @@ impl eframe::App for Dashboard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn undo_walks_this_dashboards_corrections_newest_first() {
+        let ctx = egui::Context::default();
+        let mut dashboard = Dashboard::for_test(&ctx);
+        dashboard.recorder = Some(RecorderStatus {
+            settings: Settings::default(),
+            candidates: Vec::new(),
+            problem: None,
+            recording: false,
+            capabilities: vec![CAPABILITY_TRACKED_UNDO.into()],
+        });
+        let (send, jobs) = mpsc::channel();
+        dashboard.jobs = send;
+        let (updates, receive) = mpsc::channel();
+        dashboard.updates = receive;
+        let next_command = || {
+            jobs.try_iter().find_map(|job| match job {
+                Job::Control(command, _) => Some(command),
+                _ => None,
+            })
+        };
+        let shortcut = |dashboard: &mut Dashboard| {
+            let modifiers = egui::Modifiers {
+                ctrl: true,
+                command: true,
+                ..Default::default()
+            };
+            ctx.run_ui(
+                egui::RawInput {
+                    events: vec![egui::Event::Key {
+                        key: egui::Key::Z,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: false,
+                        modifiers,
+                    }],
+                    ..Default::default()
+                },
+                |_| dashboard.shortcuts(&ctx),
+            )
+            .textures_delta
+            .clear();
+        };
+        shortcut(&mut dashboard);
+        assert!(next_command().is_none(), "fresh dashboard");
+
+        let mut tokens = Vec::new();
+        for key in ["steam:1", "steam:2"] {
+            dashboard.action(ControlRequest::ResetApp { key: key.into() }, "App reset");
+            let Some(ControlRequest::TrackCorrection { token, command }) = next_command() else {
+                panic!("app correction should be tracked");
+            };
+            assert!(matches!(*command, ControlRequest::ResetApp { .. }));
+            updates
+                .send(Update::Done(
+                    ControlKind::Correction(Some(token)),
+                    Ok("App reset"),
+                ))
+                .unwrap();
+            dashboard.receive(&ctx);
+            tokens.push(token);
+        }
+        for (token, label) in [(tokens[1], Some("Undo previous")), (tokens[0], None)] {
+            shortcut(&mut dashboard);
+            assert!(matches!(
+                next_command(),
+                Some(ControlRequest::UndoTrackedCorrection {token: request_token}) if request_token == token
+            ));
+            updates
+                .send(Update::Done(ControlKind::Undo, Ok("Change undone")))
+                .unwrap();
+            dashboard.receive(&ctx);
+            assert_eq!(dashboard.toast.as_ref().unwrap().undo, label);
+        }
+        shortcut(&mut dashboard);
+        assert!(
+            next_command().is_none(),
+            "pre-session corrections stay untouched"
+        );
+    }
 
     #[test]
     fn cache_coalesces_and_never_serves_another_key() {

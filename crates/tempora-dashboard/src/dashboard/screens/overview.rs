@@ -591,11 +591,7 @@ fn day_chart(ui: &mut Ui, vm: &OverviewVm, only: Option<Category>, plot: f32) ->
                     .collect(),
                 today: day.today,
                 future: day.future,
-                slice_detail: Some(if day.today {
-                    format!("{} · today so far", day.date.format("%A, %b %-d"))
-                } else {
-                    day.date.format("%A, %b %-d").to_string()
-                }),
+                slice_detail: Some(day.date.format("%A, %b %-d").to_string()),
             }
         })
         .collect();

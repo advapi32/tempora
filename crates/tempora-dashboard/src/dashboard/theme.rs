@@ -248,9 +248,12 @@ pub(super) fn setup(ctx: &Context) {
             include_bytes!("fonts/GeistMono-SemiBold.ttf").as_slice(),
         ),
     ] {
-        fonts
-            .font_data
-            .insert(name.into(), FontData::from_static(bytes).into());
+        let mut data = FontData::from_static(bytes);
+        if fallback == FontFamily::Proportional {
+            // Quarter-pixel glyph positions keep small proportional text evenly spaced.
+            data.tweak.subpixel_binning = Some(true);
+        }
+        fonts.font_data.insert(name.into(), data.into());
         let fallbacks = fonts.families[&fallback].iter().cloned();
         let family_fonts = std::iter::once(name.into()).chain(fallbacks).collect();
         fonts.families.insert(family, family_fonts);
@@ -299,8 +302,8 @@ pub(super) fn setup(ctx: &Context) {
 
 fn visuals(theme: egui::Theme, colors: &Tokens) -> egui::Visuals {
     let mut visuals = theme.default_visuals();
-    // Hinted glyphs on whole pixels. Sub-pixel binning evens out kerning but blurs stems,
-    // so it stays off. The transfer curves are egui's per-theme defaults.
+    // Hint all glyphs. Proportional Geist opts into fractional positioning per face,
+    // while the monospace, icon and fallback faces use whole pixels.
     visuals.text_options.font_hinting = true;
     visuals.text_options.subpixel_binning = false;
     visuals.text_options.color_transfer_function = match theme {

@@ -131,7 +131,9 @@ impl Dashboard {
             egui::Id::new("dashboard-toast"),
             &toast.message,
             toast.error,
-            toast.undo && self.recorder_online(),
+            toast
+                .undo
+                .filter(|_| self.recorder_online() && !self.pending),
         );
         match action {
             Some(ToastAction::Dismiss) => self.toast = None,
@@ -284,19 +286,43 @@ impl Dashboard {
         // to the bar beneath it, so remember where the press landed: only a press on empty
         // bar space moves the window, as with a native title bar.
         let press_on_bar = caption.id.with("press-on-bar");
-        if ctx.input(|input| input.pointer.primary_pressed()) {
-            let on_bar =
-                ctx.viewport(|viewport| viewport.hits.click.is_none_or(|hit| hit.id == caption.id));
+        let press = ctx.input(|input| {
+            input.events.iter().rev().find_map(|event| match event {
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    ..
+                } => Some(*pos),
+                _ => None,
+            })
+        });
+        if let Some(press) = press {
+            let on_bar = caption.interact_rect.contains(press)
+                && ctx.layer_id_at(press) == Some(caption.layer_id)
+                && ctx.viewport(|viewport| {
+                    !viewport
+                        .prev_pass
+                        .widgets
+                        .get_layer(caption.layer_id)
+                        .any(|widget| {
+                            widget.id != caption.id
+                                && widget.enabled
+                                && widget.sense.interactive()
+                                && widget.interact_rect.contains(press)
+                        })
+                });
             ctx.data_mut(|data| data.insert_temp(press_on_bar, on_bar));
         }
-        if caption.double_clicked() {
-            toggle_maximized(ctx);
-        } else if caption.drag_started_by(egui::PointerButton::Primary)
-            && ctx
-                .data(|data| data.get_temp(press_on_bar))
-                .unwrap_or(false)
+        if ctx
+            .data(|data| data.get_temp(press_on_bar))
+            .unwrap_or(false)
         {
-            ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+            if caption.double_clicked() {
+                toggle_maximized(ctx);
+            } else if caption.drag_started_by(egui::PointerButton::Primary) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+            }
         }
     }
 
