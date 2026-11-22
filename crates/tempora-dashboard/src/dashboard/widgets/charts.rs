@@ -10,6 +10,9 @@ const HOUR: i64 = 3_600_000;
 const MINUTE: i64 = 60_000;
 const SEGMENT_GAP: f32 = 2.0;
 const DIMMED: f32 = 0.2;
+/// A hovered chart column is washed with half the hover color, so the gridlines behind it
+/// still show.
+const COLUMN_WASH: f32 = 0.5;
 /// A dimmed lane block keeps this share of its color.
 const LANE_DIMMED: f32 = 0.3;
 
@@ -17,7 +20,12 @@ pub(in crate::dashboard) struct Segment {
     pub color: Color32,
     pub ms: i64,
     pub dimmed: bool,
+    /// The series it belongs to, named in the slice's tooltip.
+    pub name: &'static str,
 }
+
+/// Slices thinner than this still answer to the pointer within half of it.
+const SLICE_REACH: f32 = 6.0;
 
 pub(in crate::dashboard) struct StackedBar {
     /// Axis label under the bar.
@@ -30,6 +38,36 @@ pub(in crate::dashboard) struct StackedBar {
     pub today: bool,
     /// Days after today draw an empty placeholder and are not clickable.
     pub future: bool,
+    /// The second line of a slice's tooltip, naming where the slice sits (the day). Without
+    /// it the bar keeps the plain `description` tooltip.
+    pub slice_detail: Option<String>,
+}
+
+/// A slice's tooltip: its swatch, series and duration, with the day underneath.
+fn slice_tip(ui: &mut Ui, segment: &Segment, detail: &str) {
+    let colors = Tokens::get(ui);
+    // Tooltip rows size to their text, not to the app's 36 px control height.
+    ui.spacing_mut().interact_size.y = 0.0;
+    ui.spacing_mut().item_spacing = vec2(8.0, 2.0);
+    ui.horizontal(|ui| {
+        super::swatch(ui, segment.color, 8.0);
+        ui.label(
+            eframe::egui::RichText::new(segment.name)
+                .font(Tokens::medium(Tokens::SECONDARY))
+                .color(colors.fg),
+        );
+        ui.add_space(4.0);
+        ui.label(
+            eframe::egui::RichText::new(crate::dashboard::format::duration(segment.ms))
+                .font(Tokens::mono_medium(Tokens::SECONDARY))
+                .color(colors.fg),
+        );
+    });
+    ui.label(
+        eframe::egui::RichText::new(detail)
+            .size(Tokens::CAPTION)
+            .color(colors.fg_subtle),
+    );
 }
 
 /// Picks a step so five gridlines cover `max_ms`, down to five minutes, so a light week isn't
@@ -114,20 +152,37 @@ pub(in crate::dashboard) fn stacked_bars(
             vec2((slot - 2.0).max(1.0), plot.height() + TOP),
         )
         .translate(vec2(0.0, -TOP / 2.0));
-        let response = (!bar.future).then(|| bar_response(ui, column, &bar.description));
-        if response.as_ref().is_some_and(Response::hovered) {
-            ui.painter().rect_filled(column, 6, colors.hover);
-        }
         let total: i64 = bar.segments.iter().map(|segment| segment.ms).sum();
+        let rect = Rect::from_min_max(
+            pos2(x - bar_width / 2.0, plot.bottom() - total as f32 * scale),
+            pos2(x + bar_width / 2.0, plot.bottom()),
+        );
+        let slices = if total > 0 {
+            segment_rects(rect, &bar.segments, total)
+        } else {
+            Vec::new()
+        };
+        let response = (!bar.future).then(|| {
+            let response = ui.interact(column, ui.next_auto_id(), Sense::click());
+            ui.skip_ahead_auto_ids(1);
+            response.widget_info(|| {
+                WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), &bar.description)
+            });
+            response
+        });
+        let hovered = response.as_ref().filter(|response| response.hovered());
+        let slice = hovered
+            .and(bar.slice_detail.as_ref())
+            .and_then(|_| ui.ctx().pointer_hover_pos())
+            .and_then(|pointer| slice_at(&slices, pointer));
+        if hovered.is_some() {
+            ui.painter()
+                .rect_filled(column, 6, colors.hover.gamma_multiply(COLUMN_WASH));
+        }
         // A day still to come keeps its slot so the week doesn't shift, but draws no bar: a stub
         // there would read as a little recorded time.
         if !bar.future && total > 0 {
-            let visible = total as f32 * scale;
-            let rect = Rect::from_min_max(
-                pos2(x - bar_width / 2.0, plot.bottom() - visible),
-                pos2(x + bar_width / 2.0, plot.bottom()),
-            );
-            paint_segments(ui, rect, &bar.segments, total);
+            paint_segments(ui, &bar.segments, &slices, slice);
             if week && let Some(total) = &bar.total {
                 chart_label(ui, pos2(x, rect.top() - 4.0), Align2::CENTER_BOTTOM, total);
             }
@@ -152,7 +207,23 @@ pub(in crate::dashboard) fn stacked_bars(
                 },
             );
         }
-        if let Some(response) = response {
+        if let Some(mut response) = response {
+            match (&bar.slice_detail, slice) {
+                // Shown at once: the chart is read by moving across its slices. Between
+                // slices there is no tooltip: the total above the bar already says it.
+                (Some(detail), Some(slice)) => {
+                    eframe::egui::Tooltip::always_open(
+                        ui.ctx().clone(),
+                        ui.layer_id(),
+                        response.id,
+                        eframe::egui::PopupAnchor::Pointer,
+                    )
+                    .gap(14.0)
+                    .show(|ui| slice_tip(ui, &bar.segments[slice], detail));
+                }
+                (Some(_), None) => {}
+                (None, _) => response = response.on_hover_text(&bar.description),
+            }
             focus_ring(ui, &response, 6);
             if response.clicked() {
                 clicked = Some(index);
@@ -169,36 +240,67 @@ fn bar_response(ui: &mut Ui, rect: Rect, description: &str) -> Response {
     response.on_hover_text(description)
 }
 
-fn paint_segments(ui: &Ui, rect: Rect, segments: &[Segment], total: i64) {
-    let visible: Vec<_> = segments.iter().filter(|segment| segment.ms > 0).collect();
+/// Each visible segment's index and rectangle, bottom up, with a small gap between them.
+fn segment_rects(rect: Rect, segments: &[Segment], total: i64) -> Vec<(usize, Rect)> {
+    let visible: Vec<_> = segments
+        .iter()
+        .enumerate()
+        .filter(|(_, segment)| segment.ms > 0)
+        .collect();
     let count = visible.len();
     let gap = SEGMENT_GAP.min(rect.height() / count.max(1) as f32 / 2.0);
     let usable = rect.height() - gap * count.saturating_sub(1) as f32;
     let mut bottom = rect.bottom();
-    for (index, segment) in visible.into_iter().enumerate() {
-        let height = usable * segment.ms as f32 / total as f32;
-        let top = bottom - height;
-        let top_radius = if index + 1 == count { 4 } else { 1 };
+    visible
+        .into_iter()
+        .map(|(index, segment)| {
+            let top = bottom - usable * segment.ms as f32 / total as f32;
+            let slice = Rect::from_min_max(pos2(rect.left(), top), pos2(rect.right(), bottom));
+            bottom = top - gap;
+            (index, slice)
+        })
+        .collect()
+}
+
+/// The segment under `pointer`: the nearest slice vertically, so thin ones stay reachable.
+fn slice_at(slices: &[(usize, Rect)], pointer: Pos2) -> Option<usize> {
+    slices
+        .iter()
+        .filter(|(_, rect)| rect.x_range().contains(pointer.x))
+        .map(|(index, rect)| {
+            let distance = if rect.y_range().contains(pointer.y) {
+                0.0
+            } else {
+                (rect.top() - pointer.y)
+                    .abs()
+                    .min((rect.bottom() - pointer.y).abs())
+            };
+            (*index, distance)
+        })
+        .filter(|(_, distance)| *distance <= SLICE_REACH / 2.0)
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(index, _)| index)
+}
+
+/// Paints the slices; while one is hovered the others in its bar fade so it stands out.
+fn paint_segments(ui: &Ui, segments: &[Segment], slices: &[(usize, Rect)], hovered: Option<usize>) {
+    let count = slices.len();
+    for (position, (index, slice)) in slices.iter().enumerate() {
+        let segment = &segments[*index];
+        let top_radius = if position + 1 == count { 4 } else { 1 };
         let radius = CornerRadius {
             nw: top_radius,
             ne: top_radius,
             sw: 1,
             se: 1,
         };
-        let color = if segment.dimmed {
+        let faded = segment.dimmed || hovered.is_some_and(|hovered| hovered != *index);
+        let color = if faded {
             segment.color.gamma_multiply(DIMMED)
         } else {
             segment.color
         };
-        ui.painter().rect_filled(
-            snap(
-                ui,
-                Rect::from_min_max(pos2(rect.left(), top), pos2(rect.right(), bottom)),
-            ),
-            radius,
-            color,
-        );
-        bottom = top - gap;
+        ui.painter().rect_filled(snap(ui, *slice), radius, color);
     }
 }
 
@@ -293,7 +395,8 @@ pub(in crate::dashboard) fn paired_bars(
         );
         let response = bar_response(ui, column, &bar.description);
         if response.hovered() {
-            ui.painter().rect_filled(column, 4, colors.hover);
+            ui.painter()
+                .rect_filled(column, 4, colors.hover.gamma_multiply(COLUMN_WASH));
         }
         let radius = CornerRadius {
             nw: 3,
@@ -414,6 +517,39 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_pointer_finds_its_slice_and_thin_slices_stay_reachable() {
+        let segment = |ms, name| Segment {
+            color: Color32::WHITE,
+            ms,
+            dimmed: false,
+            name,
+        };
+        // 100 px tall: a 1-minute sliver on top of 99 minutes, and an empty series skipped.
+        let segments = [
+            segment(99 * MINUTE, "Games"),
+            segment(0, "Media"),
+            segment(MINUTE, "Other"),
+        ];
+        let bar = Rect::from_min_max(pos2(0.0, 0.0), pos2(40.0, 100.0));
+        let slices = segment_rects(bar, &segments, 100 * MINUTE);
+        assert_eq!(
+            slices.iter().map(|(index, _)| *index).collect::<Vec<_>>(),
+            [0, 2],
+            "empty series draw no slice"
+        );
+        let sliver = slices[1].1;
+        assert!(sliver.height() < 2.0, "{sliver:?}");
+        assert_eq!(slice_at(&slices, pos2(20.0, 60.0)), Some(0));
+        assert_eq!(
+            slice_at(&slices, pos2(20.0, sliver.top() - 2.0)),
+            Some(2),
+            "just above the sliver still reaches it"
+        );
+        assert_eq!(slice_at(&slices, pos2(20.0, sliver.top() - 10.0)), None);
+        assert_eq!(slice_at(&slices, pos2(50.0, 60.0)), None, "beside the bar");
+    }
+
+    #[test]
     fn axis_covers_the_tallest_bar_in_five_steps() {
         assert_eq!(axis_step(0), HOUR, "an empty chart stays in hours");
         assert_eq!(
@@ -526,9 +662,10 @@ pub(in crate::dashboard) fn in_front_share(focused_ms: i64, running_ms: i64) -> 
 
 /// A session's open-versus-in-front bar: the in-front share in solid, and the rest of the
 /// running time at 30%. `label` is the tooltip and accessible name.
+/// Fills its cell's width, so a wide column gives the share more room to read.
 pub(in crate::dashboard) fn open_bar(ui: &mut Ui, color: Color32, share: f32, label: &str) {
     const HEIGHT: f32 = 8.0;
-    let width = ui.available_width().min(80.0);
+    let width = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(vec2(width, HEIGHT), Sense::hover());
     let rect = snap(ui, rect);
     ui.painter().rect_filled(rect, 3, color.gamma_multiply(0.3));

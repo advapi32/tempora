@@ -6,7 +6,7 @@ use eframe::egui::{self, Align, Layout, RichText, Ui, vec2};
 use egui_phosphor::regular as icons;
 use tempora::{
     model::{CAPABILITY_RESET_APP, CAPABILITY_UNGROUP_APP, Category, ControlRequest},
-    storage::{AppSummary, Report, TimelineKind},
+    storage::{Report, TimelineKind},
 };
 
 use super::Popup;
@@ -17,9 +17,6 @@ use crate::dashboard::widgets::{
     self, Button, ButtonKind, Column, Kpi, PairedBar, RowStyle, Width,
 };
 use crate::dashboard::{AppInfo, Dashboard, format};
-
-/// Pauses this close to a session edge count as ending or preceding it.
-const PAUSE_TOLERANCE_MS: i64 = 1_000;
 
 pub(in crate::dashboard) struct DetailVm {
     pub key: String,
@@ -50,7 +47,6 @@ pub(in crate::dashboard) struct SessionVm {
     pub date: NaiveDate,
     pub running_ms: i64,
     pub focused_ms: i64,
-    pub notes: Vec<(String, bool)>,
 }
 
 pub(in crate::dashboard) struct IdentityVm {
@@ -62,62 +58,6 @@ pub(in crate::dashboard) struct IdentityVm {
     pub all_time_focused_ms: Option<i64>,
     /// The recognized name and category, when the user's edits replaced them.
     pub automatic: Option<(String, Category)>,
-}
-
-fn notes(
-    app: &AppSummary,
-    report: &Report,
-    start: i64,
-    end: i64,
-    zone: Tz,
-    today: NaiveDate,
-) -> Vec<(String, bool)> {
-    let session = app
-        .sessions
-        .iter()
-        .find(|session| session.start_ms == start && session.end_ms == end);
-    let mut notes = Vec::new();
-    if format::local_date(start, zone) == Some(today) {
-        notes.push(("Today".into(), false));
-    }
-    let paused = |at: i64, edge: fn(&tempora::storage::TimelineEntry) -> i64| {
-        report.timeline.iter().any(|entry| {
-            entry.kind == TimelineKind::Paused && (edge(entry) - at).abs() <= PAUSE_TOLERANCE_MS
-        })
-    };
-    if paused(end, |entry| entry.start_ms) {
-        notes.push(("Ended by pause".into(), true));
-    }
-    if paused(start, |entry| entry.end_ms) {
-        notes.push(("After pause".into(), true));
-    }
-    let focus_starts = report
-        .timeline
-        .iter()
-        .filter(|entry| matches!(&entry.kind, TimelineKind::Focus(owner) if *owner == app.key))
-        .filter(|entry| start <= entry.start_ms && entry.start_ms < end)
-        .count();
-    if focus_starts >= 2 {
-        notes.push((format!("Focused {focus_starts} times"), false));
-    }
-    if let Some(session) = session {
-        if session.totals.idle_ms >= 60_000 {
-            notes.push((
-                format!("Est. idle {}", format::duration(session.totals.idle_ms)),
-                false,
-            ));
-        }
-        if session.totals.unknown_ms >= 60_000 {
-            notes.push((
-                format!(
-                    "Focus unknown {}",
-                    format::duration(session.totals.unknown_ms)
-                ),
-                false,
-            ));
-        }
-    }
-    notes
 }
 
 pub(in crate::dashboard) fn detail_vm(
@@ -135,7 +75,7 @@ pub(in crate::dashboard) fn detail_vm(
         .or_else(|| all_time.map(|app| (app.name.clone(), app.category)))
         .or_else(|| catalog_name.map(|(name, category)| (name.to_owned(), category)))?;
     let source = format::source(key);
-    let range = app.zip(report).map(|(app, report)| {
+    let range = app.map(|app| {
         let mut session_rows: Vec<_> = app
             .sessions
             .iter()
@@ -145,7 +85,6 @@ pub(in crate::dashboard) fn detail_vm(
                 date: format::local_date(session.start_ms, zone).unwrap_or(today),
                 running_ms: session.totals.running_ms,
                 focused_ms: session.totals.focused_ms,
-                notes: notes(app, report, session.start_ms, session.end_ms, zone, today),
             })
             .collect();
         session_rows.reverse();
@@ -203,6 +142,17 @@ pub(in crate::dashboard) fn detail_vm(
         identity,
         hours,
     })
+}
+
+/// A session's day: "Today", "Yesterday" or "Sat, Nov 21".
+fn day_label(date: NaiveDate, today: NaiveDate) -> String {
+    if date == today {
+        "Today".into()
+    } else if Some(date) == today.pred_opt() {
+        "Yesterday".into()
+    } else {
+        date.format("%a, %b %-d").to_string()
+    }
 }
 
 fn recognition(source: &format::Source) -> Option<&'static str> {
@@ -615,6 +565,7 @@ impl Dashboard {
         range: &RangeVm,
     ) -> Option<DetailAction> {
         let colors = Tokens::get(ui);
+        let today = self.today();
         let mut opened = None;
         widgets::table_card(ui, true, |ui| {
             let width = ui.available_width();
@@ -637,12 +588,11 @@ impl Dashboard {
             });
             ui.add_space(10.0);
             let specs = [
-                Column::new("Date", Width::Fixed(130.0), Align::Min),
+                Column::new("Date", Width::Fixed(110.0), Align::Min),
                 Column::new("Time", Width::Fixed(116.0), Align::Min),
                 Column::new("Running", Width::Fixed(76.0), Align::Max),
                 Column::new("Focused", Width::Fixed(76.0), Align::Max),
-                Column::new("In front", Width::Fixed(96.0), Align::Min),
-                Column::new("Notes", Width::Flex(1.0, 120.0), Align::Min),
+                Column::new("In front", Width::Flex(1.0, 96.0), Align::Min),
                 Column::new("", Width::Fixed(16.0), Align::Max),
             ];
             let columns = widgets::scrolled_columns(ui, width, &specs);
@@ -655,27 +605,22 @@ impl Dashboard {
                 "detail-sessions",
                 widgets::TITLED_TABLE_BOTTOM,
                 |ui| {
+                    let mut previous_day = None;
                     for session in &range.session_rows {
-                        let date = session.date.format("%a, %b %-d").to_string();
+                        let date = day_label(session.date, today);
+                        // Sessions are newest first, so a day's runs sit together: name the
+                        // day once, on its first row.
+                        let first_of_day = previous_day != Some(session.date);
+                        previous_day = Some(session.date);
                         let time = format!(
                             "{} – {}",
                             format::local(session.start_ms, self.zone, "%H:%M"),
                             format::local(session.end_ms, self.zone, "%H:%M")
                         );
-                        let notes: Vec<&str> = session
-                            .notes
-                            .iter()
-                            .map(|(note, _)| note.as_str())
-                            .collect();
                         let label = format!(
-                            "{date}, {time}: {} running, {} focused{}. Open the day.",
+                            "{date}, {time}: {} running, {} focused. Open the day.",
                             format::duration(session.running_ms),
                             format::duration(session.focused_ms),
-                            if notes.is_empty() {
-                                String::new()
-                            } else {
-                                format!(", {}", notes.join(", "))
-                            }
                         );
                         let row = widgets::table_row(
                             ui,
@@ -687,13 +632,15 @@ impl Dashboard {
                             },
                             &label,
                             |row| {
-                                row.cell(0, |ui| {
-                                    widgets::truncated(
-                                        ui,
-                                        RichText::new(&date)
-                                            .font(Tokens::medium(Tokens::SECONDARY)),
-                                    );
-                                });
+                                if first_of_day {
+                                    row.cell(0, |ui| {
+                                        widgets::truncated(
+                                            ui,
+                                            RichText::new(&date)
+                                                .font(Tokens::medium(Tokens::SECONDARY)),
+                                        );
+                                    });
+                                }
                                 row.cell(1, |ui| {
                                     ui.label(
                                         widgets::mono(&time, Tokens::SECONDARY)
@@ -721,16 +668,6 @@ impl Dashboard {
                                     );
                                 });
                                 row.cell(5, |ui| {
-                                    ui.spacing_mut().item_spacing.x = 6.0;
-                                    for (note, warn) in &session.notes {
-                                        widgets::tone_tag(
-                                            ui,
-                                            note,
-                                            if *warn { colors.warn } else { colors.fg_muted },
-                                        );
-                                    }
-                                });
-                                row.cell(6, |ui| {
                                     ui.label(
                                         RichText::new(icons::CARET_RIGHT)
                                             .font(Tokens::icon(Tokens::CAPTION))
@@ -1013,7 +950,7 @@ fn hours_card(ui: &mut Ui, vm: &DetailVm, hours: &[i64; 24], range: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempora::storage::{Session, TimelineEntry, Totals};
+    use tempora::storage::{AppSummary, Session, TimelineEntry, Totals};
 
     const MINUTE: i64 = 60_000;
 
@@ -1050,7 +987,7 @@ mod tests {
     }
 
     #[test]
-    fn sessions_carry_pause_and_idle_notes_newest_first() {
+    fn sessions_list_newest_first_with_their_average() {
         let today = NaiveDate::from_ymd_opt(2026, 11, 20).unwrap();
         let start = |hour: i64| {
             today
@@ -1086,11 +1023,6 @@ mod tests {
             ],
         };
         let report = Report {
-            timeline: vec![TimelineEntry {
-                start_ms: start(2),
-                end_ms: start(3),
-                kind: TimelineKind::Paused,
-            }],
             apps: vec![app],
             ..Report::default()
         };
@@ -1098,14 +1030,21 @@ mod tests {
         let range = vm.range.unwrap();
         assert_eq!(range.sessions, 2);
         assert_eq!(range.average_ms, 90 * MINUTE);
-        let newest = &range.session_rows[0];
-        assert_eq!(newest.start_ms, start(3));
-        assert!(newest.notes.contains(&("After pause".into(), true)));
-        let older = &range.session_rows[1];
-        assert!(older.notes.contains(&("Ended by pause".into(), true)));
-        assert!(older.notes.contains(&("Est. idle 5m".into(), false)));
+        assert_eq!(range.session_rows[0].start_ms, start(3), "newest first");
+        assert_eq!(range.session_rows[1].start_ms, start(1));
         assert_eq!(vm.source.line, "Steam · App 1");
         assert!(vm.identity.is_none(), "identity waits for the info query");
+    }
+
+    #[test]
+    fn session_days_read_today_and_yesterday() {
+        let today = NaiveDate::from_ymd_opt(2026, 11, 22).unwrap();
+        assert_eq!(day_label(today, today), "Today");
+        assert_eq!(day_label(today.pred_opt().unwrap(), today), "Yesterday");
+        assert_eq!(
+            day_label(NaiveDate::from_ymd_opt(2026, 11, 20).unwrap(), today),
+            "Fri, Nov 20"
+        );
     }
 
     #[test]

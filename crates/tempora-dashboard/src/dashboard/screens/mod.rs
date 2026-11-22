@@ -938,7 +938,10 @@ mod render_tests {
         secondary_click(&ctx, &mut dashboard, at);
         match &dashboard.popup {
             Some(Popup::AppMenu(app, anchor)) => {
-                assert_eq!(app, r"exe:c:\firefox.exe", "the menu is for the clicked row");
+                assert_eq!(
+                    app, r"exe:c:\firefox.exe",
+                    "the menu is for the clicked row"
+                );
                 assert_eq!(anchor.min, at, "anchored at the pointer");
             }
             _ => panic!("a right-click on a Library row opens the app menu"),
