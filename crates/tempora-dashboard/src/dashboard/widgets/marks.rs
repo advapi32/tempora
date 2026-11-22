@@ -36,6 +36,7 @@ pub(in crate::dashboard) fn swatch(ui: &mut Ui, color: Color32, size: f32) {
 }
 
 /// 6 px green dot marking an app that is running now.
+#[cfg(debug_assertions)]
 pub(in crate::dashboard) fn live_dot(ui: &mut Ui) {
     let (rect, response) = ui.allocate_exact_size(vec2(6.0, 6.0), Sense::hover());
     ui.painter()
