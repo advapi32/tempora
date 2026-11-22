@@ -37,6 +37,21 @@ pub(super) enum LibrarySort {
     LastSeen,
 }
 
+/// A local clock reading: milliseconds after midnight, and whether it is the second time
+/// the clock shows it on a day the clocks fall back.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(super) struct ClockTime {
+    pub ms: i64,
+    pub repeat: bool,
+}
+
+impl ClockTime {
+    /// A reading that isn't the second of a repeated hour.
+    pub const fn at(ms: i64) -> Self {
+        Self { ms, repeat: false }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(super) enum DayZoom {
     /// Whole hours around the day's recorded activity.
@@ -44,12 +59,11 @@ pub(super) enum DayZoom {
     Active,
     FullDay,
     Evening,
-    /// A span picked on the lane or reached by zooming and panning it, as local clock times
-    /// in milliseconds after midnight, so stepping to another day keeps the same hours, even
-    /// across a daylight saving change.
+    /// A span picked on the lane or reached by zooming and panning it, as local clock times,
+    /// so stepping to another day keeps the same hours, even across a daylight saving change.
     Custom {
-        from: i64,
-        to: i64,
+        from: ClockTime,
+        to: ClockTime,
     },
 }
 
@@ -407,8 +421,14 @@ mod tests {
     fn resetting_a_custom_zoom_returns_to_the_preset_it_left() {
         let mut nav = Nav::new(date(11, 20), Weekday::Mon);
         nav.view.set_zoom(DayZoom::Evening);
-        nav.view.set_zoom(DayZoom::Custom { from: 1, to: 2 });
-        nav.view.set_zoom(DayZoom::Custom { from: 1, to: 3 });
+        nav.view.set_zoom(DayZoom::Custom {
+            from: ClockTime::at(1),
+            to: ClockTime::at(2),
+        });
+        nav.view.set_zoom(DayZoom::Custom {
+            from: ClockTime::at(1),
+            to: ClockTime::at(3),
+        });
         assert!(nav.view.zoomed());
         nav.view.reset_zoom();
         assert_eq!(

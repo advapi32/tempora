@@ -423,8 +423,11 @@ impl Dashboard {
         }
         let today = Local::now().date_naive();
         let range = self.nav.view.range;
+        // Only this range's report: the previous one, still drawn while this one loads,
+        // could pick a day outside the range.
         let date = self
-            .current_report()
+            .report
+            .get(&self.report_key())
             .and_then(|report| {
                 report
                     .days
@@ -874,6 +877,43 @@ fn lanes_mark(painter: &egui::Painter, rect: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn timeline_opens_a_day_in_the_selected_range_while_its_report_loads() {
+        use crate::dashboard::nav::{Period, period_range};
+        use tempora::storage::{DaySummary, Report};
+        let ctx = egui::Context::default();
+        let mut dashboard = Dashboard::for_test(&ctx);
+        let today = Local::now().date_naive();
+        let week_start = dashboard.prefs.week_start;
+        // Last week is loaded, with activity on its last day.
+        let last_week = period_range(Period::Week, today - chrono::Days::new(7), week_start);
+        dashboard.nav.set_range(Period::Week, last_week);
+        let report = Report {
+            apps: Vec::new(),
+            categories: Vec::new(),
+            days: vec![DaySummary {
+                date: last_week.end,
+                categories: Vec::new(),
+                covered_ms: 1,
+            }],
+            timeline: Vec::new(),
+            coverage: Some((0, 1)),
+        };
+        dashboard
+            .report
+            .finish((last_week, false), Ok(std::sync::Arc::new(report)));
+        // Stepping to this week, whose report hasn't arrived yet.
+        let this_week = period_range(Period::Week, today, week_start);
+        dashboard.nav.set_range(Period::Week, this_week);
+        let Page::Day(date) = dashboard.timeline_page() else {
+            panic!("Timeline opens a day");
+        };
+        assert!(
+            this_week.start <= date && date <= this_week.end,
+            "{date} is outside {this_week:?}"
+        );
+    }
 
     #[test]
     fn search_parses_dates_without_a_year_into_the_past() {

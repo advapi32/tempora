@@ -44,22 +44,39 @@ pub(super) fn day_start(date: NaiveDate, zone: Tz) -> i64 {
     local.and_utc().timestamp_millis()
 }
 
-/// The instant the clock in `zone` reads `clock_ms` after midnight on `date`; 24:00 is the
-/// next midnight. A time skipped when clocks spring forward maps to where the clock resumes,
-/// and a time that repeats when they fall back maps to its first occurrence.
-pub(super) fn clock_instant(date: NaiveDate, clock_ms: i64, zone: Tz) -> i64 {
+/// The instants at which the clock in `zone` reads `clock_ms` after midnight on `date`, in
+/// order: none for a time skipped when clocks spring forward, two for a time repeated when
+/// they fall back, else one. 24:00 is the next midnight.
+pub(super) fn clock_instants(date: NaiveDate, clock_ms: i64, zone: Tz) -> Vec<i64> {
     const DAY_MS: i64 = 24 * 3_600_000;
     if clock_ms >= DAY_MS {
-        return day_start(date + chrono::Days::new(1), zone);
+        return vec![day_start(date + chrono::Days::new(1), zone)];
     }
-    let mut local = date.and_hms_opt(0, 0, 0).expect("midnight exists")
+    let local = date.and_hms_opt(0, 0, 0).expect("midnight exists")
         + chrono::TimeDelta::milliseconds(clock_ms.max(0));
+    match zone.from_local_datetime(&local) {
+        LocalResult::Single(time) => vec![time.timestamp_millis()],
+        LocalResult::Ambiguous(first, second) => {
+            let (first, second) = (first.timestamp_millis(), second.timestamp_millis());
+            vec![first.min(second), first.max(second)]
+        }
+        LocalResult::None => Vec::new(),
+    }
+}
+
+/// The instant the clock in `zone` reads `clock_ms` after midnight on `date`. For a repeated
+/// time, `repeat` picks the second occurrence. A skipped time maps to where the clock resumes.
+pub(super) fn clock_instant(date: NaiveDate, clock_ms: i64, repeat: bool, zone: Tz) -> i64 {
     // Clock changes skip at most a few hours, so a gap ends within this many minutes.
-    for _ in 0..240 {
-        match zone.from_local_datetime(&local) {
-            LocalResult::Single(time) => return time.timestamp_millis(),
-            LocalResult::Ambiguous(first, second) => return first.min(second).timestamp_millis(),
-            LocalResult::None => local += chrono::TimeDelta::minutes(1),
+    for minutes in 0..240 {
+        let instants = clock_instants(date, clock_ms + minutes * 60_000, zone);
+        let pick = if repeat {
+            instants.last()
+        } else {
+            instants.first()
+        };
+        if let Some(instant) = pick {
+            return *instant;
         }
     }
     day_start(date, zone) + clock_ms

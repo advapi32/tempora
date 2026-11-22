@@ -8,7 +8,7 @@ use chrono_tz::Tz;
 use tempora::storage::{Report, TimelineKind};
 
 use crate::dashboard::format;
-use crate::dashboard::nav::DayZoom;
+use crate::dashboard::nav::{ClockTime, DayZoom};
 use crate::dashboard::theme::Tokens;
 
 pub(super) const MINUTE: i64 = 60_000;
@@ -301,12 +301,12 @@ pub(super) fn window(vm: &DayVm, zoom: DayZoom) -> (i64, i64) {
     match zoom {
         DayZoom::FullDay => vm.day,
         DayZoom::Custom { from, to } => {
-            let start = format::clock_instant(vm.date, from, vm.zone);
-            let end = format::clock_instant(vm.date, to, vm.zone);
+            let start = format::clock_instant(vm.date, from.ms, from.repeat, vm.zone);
+            let end = format::clock_instant(vm.date, to.ms, to.repeat, vm.zone);
             fit(start, end - start, vm.day)
         }
         DayZoom::Evening => (
-            format::clock_instant(vm.date, 17 * HOUR, vm.zone).min(vm.day.1),
+            format::clock_instant(vm.date, 17 * HOUR, false, vm.zone).min(vm.day.1),
             vm.day.1,
         ),
         DayZoom::Active => {
@@ -380,43 +380,50 @@ pub(super) fn zoom_for(window: (i64, i64), vm: &DayVm) -> DayZoom {
     }
 }
 
-/// What the clock reads at `instant` during the day, with the day's end as 24:00.
-fn clock(instant: i64, vm: &DayVm) -> i64 {
+/// What the clock reads at `instant` during the day, with the day's end as 24:00, and
+/// whether it is the second time it reads that on a day the clocks fall back.
+fn clock(instant: i64, vm: &DayVm) -> ClockTime {
     if instant >= vm.day.1 {
-        24 * HOUR
-    } else if instant <= vm.day.0 {
-        0
-    } else {
-        format::clock_ms(instant, vm.zone)
+        return ClockTime::at(24 * HOUR);
+    }
+    if instant <= vm.day.0 {
+        return ClockTime::at(0);
+    }
+    let ms = format::clock_ms(instant, vm.zone);
+    let instants = format::clock_instants(vm.date, ms, vm.zone);
+    ClockTime {
+        ms,
+        repeat: instants.len() == 2 && instants[1] == instant,
     }
 }
 
 /// Tick times and labels across the window: the finest step from 5 minutes to 6 hours that
 /// gives at most eight intervals. Ticks fall on whole clock times, labelled `HH:MM` under an
-/// hour's step and `HH` otherwise, so a daylight saving day keeps true clock labels.
+/// hour's step and `HH` otherwise. On a daylight saving day a skipped time gets no tick and a
+/// repeated one gets a tick for each occurrence, so labels agree with the pointer's readout.
 pub(super) fn tick_times(window: (i64, i64), vm: &DayVm) -> Vec<(i64, String)> {
     let span = (window.1 - window.0).max(1);
     let step = TICK_STEPS
         .into_iter()
         .find(|&step| (span + step - 1) / step <= MAX_TICK_INTERVALS)
         .unwrap_or(6 * HOUR);
-    let last = clock(window.1, vm);
-    let mut reading = (clock(window.0, vm) + step - 1).div_euclid(step) * step;
-    let mut ticks: Vec<(i64, String)> = Vec::new();
-    while reading <= last {
-        let at = format::clock_instant(vm.date, reading, vm.zone);
-        // A skipped clock time lands where the clock resumes, which another tick may share.
-        if (window.0..=window.1).contains(&at) && ticks.last().is_none_or(|(prev, _)| *prev != at) {
+    let mut ticks: Vec<(i64, String)> = (0..=24 * HOUR / step)
+        .map(|index| index * step)
+        .flat_map(|reading| {
             let minutes = reading / MINUTE;
             let label = if step < HOUR {
                 format!("{:02}:{:02}", minutes / 60, minutes % 60)
             } else {
                 format!("{:02}", minutes / 60)
             };
-            ticks.push((at, label));
-        }
-        reading += step;
-    }
+            format::clock_instants(vm.date, reading, vm.zone)
+                .into_iter()
+                .filter(|at| (window.0..=window.1).contains(at))
+                .map(move |at| (at, label.clone()))
+        })
+        .collect();
+    ticks.sort_by_key(|(at, _)| *at);
+    ticks.dedup_by_key(|(at, _)| *at);
     ticks
 }
 

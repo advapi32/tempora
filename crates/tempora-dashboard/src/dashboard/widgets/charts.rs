@@ -1240,6 +1240,11 @@ pub(in crate::dashboard) fn lane(
     if dragging && escape {
         ui.data_mut(|data| data.insert_temp(pick_cancelled, true));
     }
+    // The Escape that cancels a drag is used up here, so the page doesn't also read it as
+    // "zoom back out".
+    if escape && (dragging || scrub.drag_stopped()) {
+        ui.input_mut(|input| input.consume_key(eframe::egui::Modifiers::NONE, Key::Escape));
+    }
     let cancelled =
         escape || ui.data(|data| data.get_temp::<bool>(pick_cancelled).unwrap_or(false));
     // The span from the drag's start to the pointer, when it is wide enough to pick.

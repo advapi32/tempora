@@ -560,7 +560,25 @@ fn example_app_names() -> HashMap<&'static str, &'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dashboard::nav::ClockTime;
     use chrono::Days;
+
+    /// A day with nothing recorded in `zone`, for checking windows and ticks.
+    fn day_in(date: NaiveDate, zone: chrono_tz::Tz) -> DayVm {
+        DayVm {
+            day: (
+                format::day_start(date, zone),
+                format::day_start(date + Days::new(1), zone),
+            ),
+            date,
+            zone,
+            focused_ms: 0,
+            unknown_ms: 0,
+            gaps_ms: 0,
+            foreground: Vec::new(),
+            apps: Vec::new(),
+        }
+    }
 
     fn labels(ticks: Vec<(f32, String)>) -> Vec<String> {
         ticks.into_iter().map(|(_, label)| label).collect()
@@ -757,15 +775,15 @@ mod tests {
         let sunday = NaiveDate::from_ymd_opt(2026, 3, 29).unwrap();
         let (before, change) = (day_of(saturday), day_of(sunday));
         let picked = (
-            format::clock_instant(saturday, 9 * HOUR, zone),
-            format::clock_instant(saturday, 10 * HOUR, zone),
+            format::clock_instant(saturday, 9 * HOUR, false, zone),
+            format::clock_instant(saturday, 10 * HOUR, false, zone),
         );
         let zoom = zoom_for(picked, &before);
         assert_eq!(
             zoom,
             DayZoom::Custom {
-                from: 9 * HOUR,
-                to: 10 * HOUR
+                from: ClockTime::at(9 * HOUR),
+                to: ClockTime::at(10 * HOUR)
             }
         );
         let (start, end) = window(&change, zoom);
@@ -787,6 +805,66 @@ mod tests {
             full[1].0
         );
         assert_eq!(clock(window(&change, DayZoom::Evening).0), "17:00");
+    }
+
+    #[test]
+    fn a_zoom_into_the_repeated_hour_stays_in_the_occurrence_it_was_picked_in() {
+        let zone = chrono_tz::Europe::Berlin;
+        // Clocks in Berlin fall back from 03:00 to 02:00 on Sunday, October 25, 2026.
+        let date = NaiveDate::from_ymd_opt(2026, 10, 25).unwrap();
+        let vm = day_in(date, zone);
+        let second = |ms| format::clock_instants(date, ms, zone)[1];
+        let picked = (
+            second(2 * HOUR + 15 * MINUTE),
+            second(2 * HOUR + 45 * MINUTE),
+        );
+        let zoom = zoom_for(picked, &vm);
+        assert!(
+            matches!(
+                zoom,
+                DayZoom::Custom {
+                    from: ClockTime { repeat: true, .. },
+                    to: ClockTime { repeat: true, .. }
+                }
+            ),
+            "{zoom:?}"
+        );
+        assert_eq!(
+            window(&vm, zoom),
+            picked,
+            "the second 02:15 to 02:45, not the hour before"
+        );
+        assert_eq!(
+            labels(ticks(picked, &vm)),
+            [
+                "02:15", "02:20", "02:25", "02:30", "02:35", "02:40", "02:45"
+            ],
+            "the repeated hour still has its ticks"
+        );
+    }
+
+    #[test]
+    fn a_skipped_hour_gets_no_tick_and_the_real_one_keeps_its_label() {
+        let zone = chrono_tz::Europe::Berlin;
+        // Clocks in Berlin spring forward from 02:00 to 03:00 on Sunday, March 29, 2026.
+        let date = NaiveDate::from_ymd_opt(2026, 3, 29).unwrap();
+        let vm = day_in(date, zone);
+        let at = |ms| format::clock_instant(date, ms, false, zone);
+        let window = (at(HOUR + 30 * MINUTE), at(3 * HOUR + 30 * MINUTE));
+        let ticks = ticks(window, &vm);
+        assert_eq!(
+            labels(ticks.clone()),
+            [
+                "01:30", "01:40", "01:50", "03:00", "03:10", "03:20", "03:30"
+            ],
+            "02:00 to 02:50 never happen that day"
+        );
+        let three = ticks.iter().find(|(_, label)| label == "03:00").unwrap();
+        assert!(
+            (three.0 - 0.5).abs() < 1e-4,
+            "03:00 is half an hour after 01:30: {}",
+            three.0
+        );
     }
 
     #[test]

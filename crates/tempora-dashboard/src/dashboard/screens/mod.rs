@@ -1321,7 +1321,7 @@ mod render_tests {
         let y = start.center().y + 8.0 + 14.0 + 22.0;
         let x = |share: f32| start.left() + (end.right() - start.left()) * share;
         let span = |dashboard: &Dashboard| match dashboard.nav.view.zoom {
-            DayZoom::Custom { from, to } => (from, to),
+            DayZoom::Custom { from, to } => (from.ms, to.ms),
             other => panic!("expected a custom zoom, got {other:?}"),
         };
         let near = |actual: i64, expected: i64| (actual - expected).abs() <= 2 * 60_000;
@@ -1341,6 +1341,15 @@ mod render_tests {
         assert!(
             near(from, 20 * HOUR + 30 * 60_000) && near(to, 21 * HOUR + HOUR / 2),
             "picked 20:30 to 21:30: {from} {to}"
+        );
+
+        let zoomed = dashboard.nav.view.zoom;
+        drag(&ctx, &mut dashboard, pos2(x(0.4), y), pos2(x(0.6), y));
+        pointer_frame(&ctx, &mut dashboard, escape());
+        release(&ctx, &mut dashboard, pos2(x(0.6), y));
+        assert_eq!(
+            dashboard.nav.view.zoom, zoomed,
+            "Escape cancels a second drag and keeps the zoom it started from"
         );
 
         pointer_frame(
