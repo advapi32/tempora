@@ -429,13 +429,6 @@ pub fn write_problem(error: &StorageError) -> &'static str {
     }
 }
 
-/// Library flags for one effective app.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct LibraryFlags {
-    /// The user renamed, recategorized or grouped it.
-    pub edited: bool,
-}
-
 /// Read-only projections for the dashboard (redesign scope B).
 impl Store {
     /// Changes whenever another connection commits; cheap enough to poll.
@@ -504,26 +497,6 @@ impl Store {
             }
         }
         Ok(seen)
-    }
-
-    /// Library flags by effective app key. Only apps with a flag appear.
-    pub fn library_flags(&self) -> Result<HashMap<String, LibraryFlags>> {
-        let mut query = self.conn.prepare(
-            "SELECT s.effective_key,
-                    (a.edited_name IS NOT NULL OR a.edited_category IS NOT NULL
-                     OR EXISTS (SELECT 1 FROM correction_undo u WHERE u.app_key = a.key AND u.show_in_history = 1))
-             FROM apps a JOIN qualified_apps s ON s.key = a.key",
-        )?;
-        let members = query.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?))
-        })?;
-        let mut flags = HashMap::<String, LibraryFlags>::new();
-        for member in members {
-            let (effective, edited) = member?;
-            flags.entry(effective).or_default().edited |= edited;
-        }
-        flags.retain(|_, flags| *flags != LibraryFlags::default());
-        Ok(flags)
     }
 
     pub fn interval_count(&self) -> Result<i64> {
@@ -1053,17 +1026,7 @@ mod tests {
         assert_eq!(seen[&tool.key], t + 2 * HOUR);
 
         store.edit_app(&game.key, "My game", Category::Games)?;
-        let flags = store.library_flags()?;
-        assert!(flags[&game.key].edited);
-        assert!(!flags.contains_key(&copy.key) && !flags.contains_key(&tool.key));
-
         store.group_apps(&copy.key, &game.key)?;
-        let flags = store.library_flags()?;
-        assert!(flags[&game.key].edited);
-        assert!(
-            !flags.contains_key(&copy.key),
-            "flags follow the effective key"
-        );
         let corrections = store.corrections()?;
         assert_eq!(corrections.len(), 2);
         assert!(corrections[0].id > corrections[1].id);
@@ -1078,7 +1041,6 @@ mod tests {
 
         let empty = Store::open_writer(Path::new(":memory:"))?;
         assert_eq!(empty.history_bounds()?, None);
-        assert!(empty.library_flags()?.is_empty());
         assert!(empty.corrections()?.is_empty());
         Ok(())
     }
@@ -1151,7 +1113,6 @@ mod tests {
             })?,
             time("bounds", &|| reader.history_bounds().map(drop))?,
             time("last seen", &|| reader.last_seen_all().map(drop))?,
-            time("flags", &|| reader.library_flags().map(drop))?,
             time("corrections", &|| reader.corrections().map(drop))?,
             time("interval count", &|| reader.interval_count().map(drop))?,
         ]

@@ -11,7 +11,7 @@ use std::{
 use tempora::{
     model::{AppIdentity, AppKey, ControlRequest, DateRange, RecorderStatus, database_path},
     pipe,
-    storage::{AppSummary, CorrectionEntry, LibraryFlags, Report, Store},
+    storage::{AppSummary, Report, Store},
 };
 
 /// Projections computed with each range report.
@@ -22,10 +22,8 @@ pub(super) struct Extras {
     pub previous: Option<(i64, bool)>,
     pub bounds: Option<(i64, i64)>,
     pub last_seen: HashMap<String, i64>,
-    pub flags: HashMap<String, LibraryFlags>,
     /// Daily focused time for the seven days ending at the range's last elapsed day.
     pub week: HashMap<String, [i64; 7]>,
-    pub corrections: Vec<CorrectionEntry>,
     pub intervals: Option<i64>,
 }
 
@@ -384,9 +382,7 @@ fn extras(store: &Store, range: DateRange, zone: Tz, exclude: bool) -> Extras {
         previous: previous_focus(store, range, zone, exclude),
         bounds: store.history_bounds().ok().flatten(),
         last_seen: store.last_seen_all().unwrap_or_default(),
-        flags: store.library_flags().unwrap_or_default(),
         week: week_buckets(store, range, zone),
-        corrections: store.corrections().unwrap_or_default(),
         intervals: store.interval_count().ok(),
     }
 }

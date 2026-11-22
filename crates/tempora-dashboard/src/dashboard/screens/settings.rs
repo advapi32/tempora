@@ -15,12 +15,11 @@ use crate::dashboard::theme::Tokens;
 use crate::dashboard::widgets::{self, Button, ButtonKind, StatusKind};
 use crate::dashboard::{APP_NAME, Dashboard, Job, format};
 
-const SECTIONS: [&str; 6] = [
+const SECTIONS: [&str; 5] = [
     "General",
     "Capture",
     "Apps & exclusions",
     "Data & backup",
-    "Change history",
     "Recorder",
 ];
 const IDLE_MINUTES: [u32; 5] = [2, 5, 10, 15, 30];
@@ -110,7 +109,6 @@ impl Dashboard {
             rects.push(this.capture_card(ui, online));
             rects.push(this.apps_card(ui, online));
             rects.push(this.data_card(ui, online));
-            rects.push(this.changes_card(ui, online));
             rects.push(this.recorder_card(ui));
             let colors = Tokens::get(ui);
             ui.label(widgets::text(
@@ -559,45 +557,6 @@ impl Dashboard {
                 }) {
                     show_in_folder(&path);
                 }
-            }
-        })
-        .response
-        .rect
-    }
-
-    fn changes_card(&mut self, ui: &mut Ui, online: bool) -> Rect {
-        widgets::card(ui, |ui| {
-            ui.set_min_width(ui.available_width());
-            ui.spacing_mut().item_spacing.y = 14.0;
-            widgets::section_header(
-                ui,
-                "Change history",
-                Some("Renames, regroups and category changes. Undo restores the previous names and totals."),
-                |_| {},
-            );
-            let corrections = self
-                .extras()
-                .map(|extras| extras.corrections.clone())
-                .unwrap_or_default();
-            let colors = Tokens::get(ui);
-            if corrections.is_empty() {
-                ui.label(widgets::text("No corrections yet.", Tokens::SECONDARY, colors.fg_muted));
-            }
-            let mut undo = false;
-            for (index, correction) in corrections.iter().enumerate() {
-                let newest = index == 0;
-                let detail = if newest {
-                    "Newest change. Undo restores the previous names, categories and grouping."
-                } else {
-                    "Undo the newer changes first."
-                };
-                undo |= widgets::setting_row(ui, &correction.apps.join(", "), detail, |ui| {
-                    ui.add_enabled(online && newest, Button::new("Undo", ButtonKind::Secondary))
-                        .clicked()
-                });
-            }
-            if undo {
-                self.action(ControlRequest::UndoCorrection, "Change undone");
             }
         })
         .response

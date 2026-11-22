@@ -843,7 +843,6 @@ mod render_tests {
                 "Export sessions to CSV",
                 "Back up database",
                 "Delete all history…",
-                "Change history",
                 "Recorder",
                 "Closing this window doesn't stop recording.",
             ] {
@@ -914,6 +913,42 @@ mod render_tests {
             texts(&output)
         );
         assert!(has(&output, "Stop tracking this app"));
+    }
+
+    /// A right-click on a Library row opens the same app menu as its ⋯ button, at the pointer.
+    #[test]
+    fn right_click_on_a_library_row_opens_the_app_menu() {
+        let ctx = Context::default();
+        let mut dashboard = Dashboard::for_test(&ctx);
+        dashboard.recorder = Some(status(true));
+        let key = (dashboard.nav.view.range, dashboard.nav.view.exclude_idle);
+        dashboard
+            .report
+            .finish(key, Ok(Arc::new(report(&dashboard))));
+        dashboard.nav.section(Page::Library);
+        let output = frame(&ctx, &mut dashboard, [1100.0, 1600.0]);
+        let rows = text_rects(&output, "Firefox");
+        assert_eq!(
+            rows.len(),
+            1,
+            "one Library row for Firefox: {:?}",
+            texts(&output)
+        );
+        let at = rows[0].center();
+        secondary_click(&ctx, &mut dashboard, at);
+        match &dashboard.popup {
+            Some(Popup::AppMenu(app, anchor)) => {
+                assert_eq!(app, r"exe:c:\firefox.exe", "the menu is for the clicked row");
+                assert_eq!(anchor.min, at, "anchored at the pointer");
+            }
+            _ => panic!("a right-click on a Library row opens the app menu"),
+        }
+        let output = frame(&ctx, &mut dashboard, [1100.0, 1600.0]);
+        assert!(
+            has(&output, "Edit app…"),
+            "the menu draws: {:?}",
+            texts(&output)
+        );
     }
 
     /// A right-click on a This day row opens the app menu for that app, on the day page.

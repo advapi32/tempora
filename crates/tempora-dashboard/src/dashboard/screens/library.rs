@@ -1,4 +1,4 @@
-//! Library: searchable catalog with filters, sortable table, browser group and row actions.
+//! Library: searchable catalog with filters, sortable table and row actions.
 
 use std::cmp::Reverse;
 
@@ -16,7 +16,6 @@ use crate::dashboard::nav::{LibraryFilter, LibrarySort, Page, View};
 use crate::dashboard::theme::Tokens;
 use crate::dashboard::widgets::{self, Button, ButtonKind, Column, RowStyle, Width};
 use crate::dashboard::{Dashboard, Extras, format};
-use tempora::storage::LibraryFlags;
 
 pub(in crate::dashboard) struct LibraryRow {
     pub key: String,
@@ -30,26 +29,12 @@ pub(in crate::dashboard) struct LibraryRow {
     pub focused_ms: Option<i64>,
     pub running_ms: Option<i64>,
     pub last_seen_ms: Option<i64>,
-    pub live: bool,
-    pub flags: LibraryFlags,
     /// Seven days of focused time ending at the range's last elapsed day.
     pub week: Option<[i64; 7]>,
 }
 
-pub(in crate::dashboard) struct BrowserGroup {
-    pub focused_ms: i64,
-    /// Union of every browser's running time, not a sum.
-    pub running_ms: i64,
-    pub members: Vec<LibraryRow>,
-}
-
-pub(in crate::dashboard) enum LibraryEntry {
-    App(LibraryRow),
-    Browsers(BrowserGroup),
-}
-
 pub(in crate::dashboard) struct LibraryVm {
-    pub entries: Vec<LibraryEntry>,
+    pub rows: Vec<LibraryRow>,
     pub range_has_apps: bool,
 }
 
@@ -67,15 +52,9 @@ pub(in crate::dashboard) fn library_vm(
     report: &Report,
     catalog: &[AppIdentity],
     view: &View,
-    live: &dyn Fn(&str) -> bool,
     extras: Option<&Extras>,
 ) -> LibraryVm {
     let query = view.search.trim().to_lowercase();
-    let flags = |key: &str| {
-        extras
-            .and_then(|extras| extras.flags.get(key).copied())
-            .unwrap_or_default()
-    };
     let passes = |category: Category, name: &str, key: &str| {
         let tab = match view.library {
             LibraryFilter::All => true,
@@ -100,8 +79,6 @@ pub(in crate::dashboard) fn library_vm(
             focused_ms: Some(app.totals.focused_ms),
             running_ms: Some(app.totals.running_ms),
             last_seen_ms: Some(app.last_seen_ms),
-            live: live(&app.key),
-            flags: flags(&app.key),
             week: extras.and_then(|extras| extras.week.get(&app.key).copied()),
         })
         .collect();
@@ -121,8 +98,6 @@ pub(in crate::dashboard) fn library_vm(
                     focused_ms: None,
                     running_ms: None,
                     last_seen_ms: extras.and_then(|extras| extras.last_seen.get(&app.key).copied()),
-                    live: live(&app.key),
-                    flags: flags(&app.key),
                     week: None,
                 }),
         );
@@ -136,52 +111,8 @@ pub(in crate::dashboard) fn library_vm(
         row.subtitle = lines.get(&row.key).cloned();
     }
     rows.sort_by_key(|row| sort_key(row, view.sort));
-    let browsers = rows
-        .iter()
-        .filter(|row| row.category == Category::Browsers && row.focused_ms.is_some())
-        .count();
-    let mut entries = Vec::new();
-    if browsers >= 2 {
-        let (members, others): (Vec<_>, Vec<_>) = rows
-            .into_iter()
-            .partition(|row| row.category == Category::Browsers && row.focused_ms.is_some());
-        let totals = report
-            .categories
-            .iter()
-            .find(|row| row.category == Category::Browsers)
-            .map(|row| row.totals)
-            .unwrap_or_default();
-        let group = BrowserGroup {
-            focused_ms: totals.focused_ms,
-            running_ms: totals.running_ms,
-            members,
-        };
-        let group_key = match view.sort {
-            LibrarySort::Focused => group.focused_ms,
-            LibrarySort::Running => group.running_ms,
-            LibrarySort::LastSeen => group
-                .members
-                .iter()
-                .filter_map(|row| row.last_seen_ms)
-                .max()
-                .unwrap_or(i64::MIN),
-            LibrarySort::Name => 0,
-        };
-        let position = others
-            .iter()
-            .position(|row| sort_key(row, view.sort) > (Reverse(group_key), "browsers".into()))
-            .unwrap_or(others.len());
-        let mut others = others
-            .into_iter()
-            .map(LibraryEntry::App)
-            .collect::<Vec<_>>();
-        others.insert(position, LibraryEntry::Browsers(group));
-        entries = others;
-    } else {
-        entries.extend(rows.into_iter().map(LibraryEntry::App));
-    }
     LibraryVm {
-        entries,
+        rows,
         range_has_apps: !report.apps.is_empty(),
     }
 }
@@ -206,7 +137,6 @@ enum RowAction {
     Open(String),
     Menu(String, Rect),
     Edit(String),
-    Toggle,
 }
 
 impl Dashboard {
@@ -216,20 +146,8 @@ impl Dashboard {
         let Some(report) = self.current_report() else {
             return;
         };
-        let candidates: Vec<String> = self
-            .recorder
-            .iter()
-            .flat_map(|status| status.candidates.iter().map(|app| app.key.clone()))
-            .collect();
-        let live = |key: &str| candidates.iter().any(|candidate| candidate == key);
         let extras = self.extras();
-        let vm = library_vm(
-            &report,
-            &self.apps,
-            &self.nav.view,
-            &live,
-            extras.as_deref(),
-        );
+        let vm = library_vm(&report, &self.apps, &self.nav.view, extras.as_deref());
         if !vm.range_has_apps && self.nav.view.search.trim().is_empty() {
             // One click to the data, however far the range was stepped away from it.
             let latest = self.latest_activity_range();
@@ -260,15 +178,8 @@ impl Dashboard {
         match action {
             Some(RowAction::Open(key)) => self.nav.drill(Page::App(key)),
             Some(RowAction::Menu(key, anchor)) => self.toggle_app_menu(key, anchor),
-            Some(RowAction::Edit(key)) => {
-                if self.recorder_online() {
-                    self.open_edit(&key);
-                }
-            }
-            Some(RowAction::Toggle) => {
-                self.nav.view.browsers_expanded = !self.nav.view.browsers_expanded;
-            }
-            None => {}
+            Some(RowAction::Edit(key)) if self.recorder_online() => self.open_edit(&key),
+            Some(RowAction::Edit(_)) | None => {}
         }
     }
 
@@ -402,7 +313,7 @@ impl Dashboard {
         if let Some(sort) = clicked.and_then(|index| sorts[index]) {
             self.nav.view.sort = sort;
         }
-        if vm.entries.is_empty() {
+        if vm.rows.is_empty() {
             ui.add_space(40.0);
             ui.vertical_centered(|ui| {
                 ui.label(widgets::text(
@@ -422,27 +333,9 @@ impl Dashboard {
             "library-rows",
             LIBRARY_CAPTION,
             |ui| {
-                for entry in &vm.entries {
-                    match entry {
-                        LibraryEntry::App(row) => {
-                            if let Some(next) = self.library_row(ui, &columns, row, 0.0, today) {
-                                action = Some(next);
-                            }
-                        }
-                        LibraryEntry::Browsers(group) => {
-                            if let Some(next) = self.browser_group_row(ui, &columns, group) {
-                                action = Some(next);
-                            }
-                            if self.nav.view.browsers_expanded {
-                                for row in &group.members {
-                                    if let Some(next) =
-                                        self.library_row(ui, &columns, row, 28.0, today)
-                                    {
-                                        action = Some(next);
-                                    }
-                                }
-                            }
-                        }
+                for row in &vm.rows {
+                    if let Some(next) = self.library_row(ui, &columns, row, today) {
+                        action = Some(next);
                     }
                 }
             },
@@ -450,87 +343,19 @@ impl Dashboard {
         action
     }
 
-    fn browser_group_row(
-        &self,
-        ui: &mut Ui,
-        columns: &widgets::Columns,
-        group: &BrowserGroup,
-    ) -> Option<RowAction> {
-        let colors = Tokens::get(ui);
-        let expanded = self.nav.view.browsers_expanded;
-        let label = format!(
-            "Browsers, {} apps, {} focused, {} running combined. {}",
-            group.members.len(),
-            format::duration(group.focused_ms),
-            format::duration(group.running_ms),
-            if expanded { "Collapse." } else { "Expand." }
-        );
-        let mut toggled = false;
-        let row = widgets::table_row(
-            ui,
-            ui.id().with("browser-group"),
-            columns,
-            RowStyle {
-                height: ROW_HEIGHT,
-                ..RowStyle::default()
-            },
-            &label,
-            |row| {
-                row.cell(0, |ui| {
-                    ui.spacing_mut().item_spacing.x = 8.0;
-                    let chevron = Button {
-                        min_width: 24.0,
-                        ..Button::new(
-                            if expanded {
-                                "Hide browsers"
-                            } else {
-                                "Show browsers"
-                            },
-                            ButtonKind::GhostIcon,
-                        )
-                        .small()
-                        .with_icon(if expanded {
-                            icons::CARET_DOWN
-                        } else {
-                            icons::CARET_RIGHT
-                        })
-                    };
-                    toggled = ui.add(chevron).clicked();
-                    widgets::app_cell(
-                        ui,
-                        None,
-                        "Browsers",
-                        Some(&format!(
-                            "{} browsers · running time is combined",
-                            group.members.len()
-                        )),
-                        Category::Browsers,
-                        32.0,
-                    );
-                });
-                row.cell(1, |ui| widgets::category_label(ui, Category::Browsers));
-                row.number(2, &format::duration(group.focused_ms), colors.fg);
-                row.number(3, &format::duration(group.running_ms), colors.fg_muted);
-            },
-        );
-        (toggled || row.clicked()).then_some(RowAction::Toggle)
-    }
-
     fn library_row(
         &self,
         ui: &mut Ui,
         columns: &widgets::Columns,
         row: &LibraryRow,
-        indent: f32,
         today: NaiveDate,
     ) -> Option<RowAction> {
         let online = self.recorder_online();
         let colors = Tokens::get(ui);
         let last_seen = row.last_seen_ms.map(|ms| last_seen(ms, self.zone, today));
         let label = format!(
-            "{}{}, {}, {}{}. Open details.",
+            "{}, {}, {}{}. Open details.",
             row.name,
-            if row.live { ", running now" } else { "" },
             row.category.label(),
             match (row.focused_ms, row.running_ms) {
                 (Some(focused), Some(running)) => format!(
@@ -552,7 +377,6 @@ impl Dashboard {
             columns,
             RowStyle {
                 height: ROW_HEIGHT,
-                indent,
                 ..RowStyle::default()
             },
             &label,
@@ -565,14 +389,7 @@ impl Dashboard {
                         row.subtitle.as_deref(),
                         row.category,
                         32.0,
-                        |ui| {
-                            if row.live {
-                                widgets::live_dot(ui);
-                            }
-                            if row.flags.edited {
-                                widgets::tone_tag(ui, "Edited", colors.fg_muted);
-                            }
-                        },
+                        |_| {},
                     )
                     .on_hover_text(row.source.as_str());
                 });
@@ -623,6 +440,12 @@ impl Dashboard {
         if let Some(anchor) = menu {
             return Some(RowAction::Menu(row.key.clone(), anchor));
         }
+        // A right-click opens the same menu as the row's ⋯ button, at the pointer.
+        if response.secondary_clicked()
+            && let Some(pos) = response.interact_pointer_pos()
+        {
+            return Some(RowAction::Menu(row.key.clone(), super::pointer_anchor(pos)));
+        }
         if online && response.has_focus() && ui.input(|input| input.key_pressed(Key::F2)) {
             return Some(RowAction::Edit(row.key.clone()));
         }
@@ -635,7 +458,7 @@ mod tests {
     use super::*;
     use crate::dashboard::nav::Nav;
     use chrono::Weekday;
-    use tempora::storage::{AppSummary, CategorySummary, Totals};
+    use tempora::storage::{AppSummary, Totals};
 
     const HOUR: i64 = 3_600_000;
 
@@ -663,37 +486,16 @@ mod tests {
                 app("steam:1", Category::Games, 3 * HOUR, 3 * HOUR),
                 app("exe:code", Category::Productivity, HOUR / 4, HOUR),
             ],
-            categories: vec![CategorySummary {
-                category: Category::Browsers,
-                totals: Totals {
-                    focused_ms: 3 * HOUR / 2,
-                    running_ms: 4 * HOUR,
-                    ..Totals::default()
-                },
-            }],
             ..Report::default()
         }
     }
 
     #[test]
-    fn browsers_group_with_unioned_running_time_in_sort_order() {
+    fn browsers_are_ordinary_rows_in_sort_order() {
         let nav = Nav::new(NaiveDate::from_ymd_opt(2026, 11, 20).unwrap(), Weekday::Mon);
-        let vm = library_vm(&report(), &[], &nav.view, &|key| key == "steam:1", None);
-        assert_eq!(vm.entries.len(), 3, "two apps plus the browser group");
-        let LibraryEntry::App(first) = &vm.entries[0] else {
-            panic!("game first")
-        };
-        assert!(first.live);
-        let LibraryEntry::Browsers(group) = &vm.entries[1] else {
-            panic!("browsers second")
-        };
-        assert_eq!(
-            group.running_ms,
-            4 * HOUR,
-            "union from the category, not 5h"
-        );
-        assert_eq!(group.members.len(), 2);
-        assert!(matches!(&vm.entries[2], LibraryEntry::App(row) if row.key == "exe:code"));
+        let vm = library_vm(&report(), &[], &nav.view, None);
+        let keys: Vec<&str> = vm.rows.iter().map(|row| row.key.as_str()).collect();
+        assert_eq!(keys, ["steam:1", "exe:firefox", "exe:chrome", "exe:code"]);
     }
 
     #[test]
@@ -705,19 +507,19 @@ mod tests {
             category: Category::Games,
         }];
         nav.view.search = "factorio".into();
-        let vm = library_vm(&report(), &catalog, &nav.view, &|_| false, None);
-        assert!(matches!(&vm.entries[..], [LibraryEntry::App(row)] if row.focused_ms.is_none()));
+        let vm = library_vm(&report(), &catalog, &nav.view, None);
+        assert!(matches!(&vm.rows[..], [row] if row.focused_ms.is_none()));
         nav.view.search.clear();
         nav.view.library = LibraryFilter::Apps;
-        let vm = library_vm(&report(), &catalog, &nav.view, &|_| false, None);
-        assert_eq!(vm.entries.len(), 2);
+        let vm = library_vm(&report(), &catalog, &nav.view, None);
+        assert_eq!(vm.rows.len(), 3, "both browsers and Code");
         nav.view.category = Some(Category::Productivity);
-        let vm = library_vm(&report(), &catalog, &nav.view, &|_| false, None);
-        assert_eq!(vm.entries.len(), 1);
+        let vm = library_vm(&report(), &catalog, &nav.view, None);
+        assert_eq!(vm.rows.len(), 1);
     }
 
     #[test]
-    fn edited_flag_tags_rows_and_fills_inactive_last_seen() {
+    fn extras_fill_the_week_and_inactive_last_seen() {
         let mut nav = Nav::new(NaiveDate::from_ymd_opt(2026, 11, 20).unwrap(), Weekday::Mon);
         let catalog = vec![AppIdentity {
             key: r"exe:d:\old\tool.exe".into(),
@@ -725,21 +527,13 @@ mod tests {
             category: Category::Other,
         }];
         let mut extras = Extras::default();
-        extras
-            .flags
-            .insert("steam:1".into(), LibraryFlags { edited: true });
         extras.last_seen.insert(catalog[0].key.clone(), 42);
         extras.week.insert("steam:1".into(), [0, 1, 2, 3, 4, 5, 6]);
-        let vm = library_vm(&report(), &catalog, &nav.view, &|_| false, Some(&extras));
-        let LibraryEntry::App(game) = &vm.entries[0] else {
-            panic!("game first")
-        };
-        assert!(game.flags.edited);
+        let vm = library_vm(&report(), &catalog, &nav.view, Some(&extras));
+        let game = &vm.rows[0];
         assert_eq!(game.week, Some([0, 1, 2, 3, 4, 5, 6]));
         nav.view.search = "old".into();
-        let vm = library_vm(&report(), &catalog, &nav.view, &|_| false, Some(&extras));
-        assert!(
-            matches!(&vm.entries[..], [LibraryEntry::App(row)] if row.last_seen_ms == Some(42))
-        );
+        let vm = library_vm(&report(), &catalog, &nav.view, Some(&extras));
+        assert!(matches!(&vm.rows[..], [row] if row.last_seen_ms == Some(42)));
     }
 }

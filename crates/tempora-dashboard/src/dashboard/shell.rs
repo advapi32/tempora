@@ -280,9 +280,22 @@ impl Dashboard {
             window_controls,
         );
         let ctx = ui.ctx();
+        // egui hands a drag that starts on a click-only control (a nav tab, the search pill)
+        // to the bar beneath it, so remember where the press landed: only a press on empty
+        // bar space moves the window, as with a native title bar.
+        let press_on_bar = caption.id.with("press-on-bar");
+        if ctx.input(|input| input.pointer.primary_pressed()) {
+            let on_bar =
+                ctx.viewport(|viewport| viewport.hits.click.is_none_or(|hit| hit.id == caption.id));
+            ctx.data_mut(|data| data.insert_temp(press_on_bar, on_bar));
+        }
         if caption.double_clicked() {
             toggle_maximized(ctx);
-        } else if caption.drag_started_by(egui::PointerButton::Primary) {
+        } else if caption.drag_started_by(egui::PointerButton::Primary)
+            && ctx
+                .data(|data| data.get_temp(press_on_bar))
+                .unwrap_or(false)
+        {
             ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
         }
     }

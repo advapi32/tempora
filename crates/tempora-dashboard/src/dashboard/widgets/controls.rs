@@ -247,6 +247,11 @@ fn control(ui: &mut Ui, label: &str, spec: Control) -> Response {
             (colors.card, border)
         }
         _ if spec.selected == Some(true) => (colors.muted, colors.fg_subtle),
+        // An unselected option inside a muted group: `hover` would match the group's fill.
+        _ if spec.selected_shadow && active => {
+            foreground = colors.fg;
+            (colors.group_hover, Color32::TRANSPARENT)
+        }
         ButtonKind::Secondary | ButtonKind::Icon => (
             if active {
                 colors.control_hover
@@ -272,13 +277,7 @@ fn control(ui: &mut Ui, label: &str, spec: Control) -> Response {
 
     let painter = ui.painter();
     if spec.selected_shadow && spec.selected == Some(true) {
-        let shadow = egui::Shadow {
-            offset: [0, 1],
-            blur: 2,
-            spread: 0,
-            color: Color32::from_black_alpha(80),
-        };
-        painter.add(shadow.as_shape(rect, spec.radius));
+        painter.add(colors.raised.as_shape(rect, spec.radius));
     }
     painter.rect(
         rect,
@@ -339,7 +338,20 @@ fn control(ui: &mut Ui, label: &str, spec: Control) -> Response {
             foreground,
         );
     }
-    focus_ring(ui, &response, spec.radius);
+    if spec.selected_shadow {
+        // Packed 2 px from its neighbours and 4 px from the track's edge: a ring outside
+        // would run under the next option's hover fill, so it goes inside the chip.
+        if response.has_focus() {
+            painter.rect_stroke(
+                rect,
+                spec.radius,
+                Stroke::new(2.0, colors.focus),
+                StrokeKind::Inside,
+            );
+        }
+    } else {
+        focus_ring(ui, &response, spec.radius);
+    }
     if icon_only {
         response.on_hover_text(label)
     } else {
@@ -471,7 +483,8 @@ pub(in crate::dashboard) fn nav(
                             radius,
                             selected: Some(active),
                             selected_shadow: true,
-                            outlined: active,
+                            // Light mode lifts the selected tab with its shadow alone.
+                            outlined: active && ui.visuals().dark_mode,
                             text_color: Some(if active { colors.fg } else { colors.fg_muted }),
                             ..Control::default()
                         },
@@ -525,6 +538,9 @@ pub(in crate::dashboard) fn segmented<T: Copy + PartialEq>(
                 ui.spacing_mut().interact_size.y = 28.0;
                 let mut responses = Vec::with_capacity(options.len());
                 let mut next = None;
+                // Only arrow keys move focus along: a click selects without leaving a
+                // keyboard focus ring behind.
+                let mut by_key = false;
                 for (index, &(option, label)) in options.iter().enumerate() {
                     let selected = *value == option;
                     let response = control(
@@ -552,6 +568,7 @@ pub(in crate::dashboard) fn segmented<T: Copy + PartialEq>(
                                 None
                             }
                         });
+                        by_key = next.is_some();
                     }
                     responses.push(response);
                 }
@@ -559,7 +576,9 @@ pub(in crate::dashboard) fn segmented<T: Copy + PartialEq>(
                     let selected = options[index].0;
                     changed = *value != selected;
                     *value = selected;
-                    responses[index].request_focus();
+                    if by_key {
+                        responses[index].request_focus();
+                    }
                     if changed {
                         responses[index].mark_changed();
                     }
@@ -585,10 +604,11 @@ pub(in crate::dashboard) fn button_group<R>(ui: &mut Ui, content: impl FnOnce(&m
         .inner
 }
 
+/// A muted track without a border, like shadcn's tabs list. The extra pixel of margin
+/// stands in for the border it used to have, so group sizes stay the same.
 fn group_frame(colors: &Tokens, padding: i8, radius: u8) -> Frame {
     Frame::new()
-        .inner_margin(padding)
-        .stroke(Stroke::new(1.0, colors.border))
+        .inner_margin(padding + 1)
         .corner_radius(radius)
         .fill(colors.muted)
 }
@@ -774,13 +794,8 @@ impl InlineKey {
 
     fn paint(&self, ui: &Ui, rect: Rect) {
         let colors = Tokens::get(ui);
-        ui.painter().rect(
-            rect,
-            Tokens::TAG_RADIUS,
-            colors.muted,
-            Stroke::new(1.0, colors.border),
-            StrokeKind::Inside,
-        );
+        ui.painter()
+            .rect_filled(rect, Tokens::TAG_RADIUS, colors.muted);
         ui.painter().galley(
             rect.center() - self.text.size() / 2.0,
             self.text.clone(),

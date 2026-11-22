@@ -58,7 +58,6 @@ pub(super) struct View {
     pub library: LibraryFilter,
     pub sort: LibrarySort,
     pub search: String,
-    pub browsers_expanded: bool,
     /// Overview and App detail Chart/Table toggles.
     pub overview_table: bool,
     pub trend_table: bool,
@@ -93,7 +92,6 @@ impl Nav {
             library: LibraryFilter::All,
             sort: LibrarySort::Focused,
             search: String::new(),
-            browsers_expanded: false,
             overview_table: false,
             trend_table: false,
             zoom: DayZoom::Active,

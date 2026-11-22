@@ -5,7 +5,7 @@ use chrono_tz::Tz;
 use eframe::egui::{self, Align, Layout, RichText, Ui, vec2};
 use egui_phosphor::regular as icons;
 use tempora::{
-    model::{CAPABILITY_UNGROUP_APP, Category, ControlRequest},
+    model::{CAPABILITY_RESET_APP, CAPABILITY_UNGROUP_APP, Category, ControlRequest},
     storage::{AppSummary, Report, TimelineKind},
 };
 
@@ -60,6 +60,8 @@ pub(in crate::dashboard) struct IdentityVm {
     pub executables: Vec<String>,
     pub first_seen: Option<NaiveDate>,
     pub all_time_focused_ms: Option<i64>,
+    /// The recognized name and category, when the user's edits replaced them.
+    pub automatic: Option<(String, Category)>,
 }
 
 fn notes(
@@ -186,6 +188,10 @@ pub(in crate::dashboard) fn detail_vm(
             .and_then(|app| app.sessions.first())
             .and_then(|session| format::local_date(session.start_ms, zone)),
         all_time_focused_ms: all_time.map(|app| app.totals.focused_ms),
+        automatic: info
+            .automatic
+            .clone()
+            .filter(|automatic| *automatic != (name.clone(), category)),
     });
     let hours = report.and_then(|report| focus_by_hour(report, key, zone));
     Some(DetailVm {
@@ -226,6 +232,7 @@ enum DetailAction {
     StopTracking,
     Delete,
     RemoveFromGroup(String),
+    Reset,
 }
 
 impl Dashboard {
@@ -266,6 +273,13 @@ impl Dashboard {
         } else {
             None
         };
+        let reset_blocked = if !self.recorder_online() {
+            Some("The recorder isn't running")
+        } else if !self.recorder_can(CAPABILITY_RESET_APP) {
+            Some("Update the recorder to use this")
+        } else {
+            None
+        };
         let range_label = format::range_label(self.nav.view.range, self.nav.view.period);
         let main = |ui: &mut Ui, this: &mut Self| -> Option<DetailAction> {
             match &vm.range {
@@ -287,10 +301,9 @@ impl Dashboard {
             }
         };
         let side = |ui: &mut Ui| -> Option<DetailAction> {
-            let identity_action = vm
-                .identity
-                .as_ref()
-                .and_then(|identity| identity_card(ui, &vm, identity, ungroup_blocked));
+            let identity_action = vm.identity.as_ref().and_then(|identity| {
+                identity_card(ui, &vm, identity, ungroup_blocked, reset_blocked)
+            });
             if let Some(hours) = &vm.hours {
                 hours_card(ui, &vm, hours, &range_label);
             }
@@ -361,12 +374,22 @@ impl Dashboard {
                 ControlRequest::UngroupApp { key: source },
                 "Removed from group",
             ),
+            Some(DetailAction::Reset) => self.action(
+                ControlRequest::ResetApp {
+                    key: vm.key.clone(),
+                },
+                "Reset to automatic",
+            ),
             None => {}
         }
     }
 
     fn detail_header(&mut self, ui: &mut Ui, vm: &DetailVm) -> Option<DetailAction> {
         let mut action = None;
+        let running = self
+            .recorder
+            .iter()
+            .any(|status| status.candidates.iter().any(|app| app.key == vm.key));
         let width = ui.available_width();
         ui.allocate_ui_with_layout(
             vec2(width, 56.0),
@@ -390,6 +413,9 @@ impl Dashboard {
                             ui.spacing_mut().item_spacing.x = 6.0;
                             widgets::category_tag(ui, vm.category);
                             let colors = Tokens::get(ui);
+                            if running {
+                                widgets::tone_tag(ui, "Running now", colors.ok);
+                            }
                             widgets::tone_tag(ui, &vm.source.line, colors.fg_muted);
                             if let Some(recognition) = recognition(&vm.source) {
                                 widgets::tone_tag(ui, recognition, colors.fg_muted);
@@ -777,6 +803,7 @@ fn identity_card(
     vm: &DetailVm,
     identity: &IdentityVm,
     ungroup_blocked: Option<&str>,
+    reset_blocked: Option<&str>,
 ) -> Option<DetailAction> {
     let colors = Tokens::get(ui);
     widgets::card(ui, |ui| {
@@ -837,6 +864,49 @@ fn identity_card(
                         };
                         widgets::truncated(ui, text);
                     }
+                });
+            });
+        }
+        if let Some((name, category)) = &identity.automatic {
+            // Right to left, like the group's sources: Reset at the edge, the value beside
+            // its label.
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let response = ui.add_enabled(
+                    reset_blocked.is_none(),
+                    Button::new("Reset", ButtonKind::Ghost).small(),
+                );
+                response.widget_info(|| {
+                    egui::WidgetInfo::labeled(
+                        egui::WidgetType::Button,
+                        reset_blocked.is_none(),
+                        format!("Reset to {name}, {}", category.label()),
+                    )
+                });
+                let response = match reset_blocked {
+                    Some(reason) => response.on_disabled_hover_text(reason),
+                    None => response.on_hover_text("Use the automatic name and category"),
+                };
+                if response.clicked() {
+                    picked = Some(DetailAction::Reset);
+                }
+                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing.x = 12.0;
+                    ui.allocate_ui_with_layout(
+                        vec2(100.0, 18.0),
+                        Layout::left_to_right(Align::Center),
+                        |ui| {
+                            ui.label(widgets::text(
+                                "Automatic",
+                                Tokens::SECONDARY,
+                                colors.fg_subtle,
+                            ));
+                        },
+                    );
+                    widgets::truncated(
+                        ui,
+                        RichText::new(format!("{name} · {}", category.label()))
+                            .size(Tokens::SECONDARY),
+                    );
                 });
             });
         }
@@ -946,6 +1016,38 @@ mod tests {
     use tempora::storage::{Session, TimelineEntry, Totals};
 
     const MINUTE: i64 = 60_000;
+
+    #[test]
+    fn identity_offers_the_automatic_identity_only_when_edits_replaced_it() {
+        let key = r"exe:c:\code\code.exe";
+        let today = NaiveDate::from_ymd_opt(2026, 11, 22).unwrap();
+        let vm = |automatic: (&str, Category)| {
+            let info = AppInfo {
+                all_time: None,
+                sources: vec![key.into()],
+                automatic: Some((automatic.0.into(), automatic.1)),
+            };
+            detail_vm(
+                key,
+                None,
+                Some(&info),
+                Some(("Visual Studio Code", Category::Productivity)),
+                chrono_tz::UTC,
+                today,
+            )
+            .and_then(|vm| vm.identity)
+            .and_then(|identity| identity.automatic)
+        };
+        assert_eq!(
+            vm(("Code", Category::Other)),
+            Some(("Code".into(), Category::Other))
+        );
+        assert_eq!(
+            vm(("Visual Studio Code", Category::Productivity)),
+            None,
+            "nothing to reset"
+        );
+    }
 
     #[test]
     fn sessions_carry_pause_and_idle_notes_newest_first() {
