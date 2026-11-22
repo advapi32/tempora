@@ -23,19 +23,29 @@ find_iscc() {
     return 1
 }
 
+workspace_version() {
+    awk -F '"' '
+        /^[[:space:]]*\[workspace\.package\][[:space:]]*$/ { in_package = 1; next }
+        /^[[:space:]]*\[/ { in_package = 0 }
+        in_package && /^[[:space:]]*version[[:space:]]*=/ { print $2; exit }
+    ' Cargo.toml
+}
+
 if [[ ${1:-} == --find-iscc ]]; then
     find_iscc
     exit
 fi
 
-version=$(awk -F '"' '
-    /^[[:space:]]*\[workspace\.package\][[:space:]]*$/ { in_package = 1; next }
-    /^[[:space:]]*\[/ { in_package = 0 }
-    in_package && /^[[:space:]]*version[[:space:]]*=/ { print $2; exit }
-' Cargo.toml)
+version=$(workspace_version)
 if [[ -z "$version" ]]; then
     printf '%s\n' 'Could not read the workspace version from Cargo.toml.' >&2
     exit 1
+fi
+
+# The release workflow checks its tag against this before building.
+if [[ ${1:-} == --print-version ]]; then
+    printf '%s\n' "$version"
+    exit
 fi
 
 target=x86_64-pc-windows-msvc
