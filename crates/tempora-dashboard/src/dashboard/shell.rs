@@ -335,6 +335,14 @@ impl Dashboard {
                 ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
             }
         }
+        // With the window hook, Windows takes presses on the bar's empty space itself (see
+        // `caption`), and the drag handling above only runs without it. Nothing is claimed
+        // while a popup or dialog is open, so a click on the bar still dismisses it.
+        if super::caption::installed() {
+            let open =
+                self.popup.is_some() || self.dialog.is_some() || egui::Popup::is_any_open(ctx);
+            publish_caption(ctx, &caption, !open);
+        }
     }
 
     fn open_search(&mut self, ctx: &Context) {
@@ -773,6 +781,49 @@ fn window_controls(ui: &mut Ui) {
 fn toggle_maximized(ctx: &Context) {
     let maximized = ctx.input(|input| input.viewport().maximized.unwrap_or(false));
     ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+}
+
+/// Tells the window hook where the title bar's empty space is: the bar minus its controls,
+/// anything drawn over it, and the resize edges.
+fn publish_caption(ctx: &Context, caption: &egui::Response, claim: bool) {
+    let pixels_per_point = ctx.pixels_per_point();
+    if !claim {
+        super::caption::set_caption(egui::Rect::NOTHING, &[], pixels_per_point);
+        return;
+    }
+    let maximized = ctx.input(|input| input.viewport().maximized.unwrap_or(false));
+    let mut area = caption.interact_rect;
+    let mut holes = Vec::new();
+    if !maximized {
+        // The edges and top corners resize the window; see `resize_edges`.
+        area.min.y += RESIZE_EDGE;
+        area.min.x += RESIZE_EDGE;
+        area.max.x -= RESIZE_EDGE;
+        let window = ctx.content_rect();
+        let corner = vec2(RESIZE_CORNER, RESIZE_CORNER);
+        holes.push(egui::Rect::from_min_size(window.left_top(), corner));
+        holes.push(egui::Rect::from_min_size(
+            window.right_top() - vec2(RESIZE_CORNER, 0.0),
+            corner,
+        ));
+    }
+    ctx.viewport(|viewport| {
+        holes.extend(
+            viewport
+                .prev_pass
+                .widgets
+                .layers()
+                .flat_map(|(_, widgets)| widgets.iter())
+                .filter(|widget| {
+                    widget.id != caption.id
+                        && widget.enabled
+                        && widget.sense.interactive()
+                        && widget.interact_rect.intersects(area)
+                })
+                .map(|widget| widget.interact_rect),
+        );
+    });
+    super::caption::set_caption(area, &holes, pixels_per_point);
 }
 
 /// The window has no frame, so its edges resize it: the cursor changes near an edge and a
