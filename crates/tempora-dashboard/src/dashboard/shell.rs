@@ -100,6 +100,17 @@ impl Dashboard {
                                     self.recorder_banner(ui);
                                     self.first_run_page(ui, wide);
                                 } else {
+                                    // Each page, and each day on the Day page, fades in.
+                                    let fade = widgets::motion::tween(
+                                        ctx,
+                                        egui::Id::new(("page-fade", self.nav.page())),
+                                        1.0,
+                                        widgets::motion::Ease {
+                                            enter: widgets::motion::PAGE,
+                                            ..widgets::motion::Ease::GROW
+                                        },
+                                    );
+                                    ui.multiply_opacity(fade);
                                     self.page_heading(ui);
                                     self.recorder_banner(ui);
                                     self.content(ui, wide);

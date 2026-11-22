@@ -376,7 +376,7 @@ impl Samples {
                 ui,
                 &[(0.0, "18".into()), (0.5, "21".into()), (1.0, "24".into())],
             );
-            widgets::lane(ui, 40.0, &[0.5], &blocks, Some((0.05, 0.35)));
+            widgets::lane(ui, 40.0, &[0.5], &blocks, Some((0.05, 0.35)), None);
             let start = chrono::NaiveDate::from_ymd_opt(2026, 8, 3).unwrap();
             let days: Vec<_> = (0..90)
                 .map(|offset| {
@@ -688,6 +688,8 @@ mod tests {
             let ctx = Context::default();
             ctx.options_mut(|options| options.zoom_factor = 1.25);
             let mut gallery = Gallery::new(&ctx);
+            // Specimens are checked as drawn once settled.
+            widgets::motion::set_enabled(&ctx, false);
             let mut input = egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(1100.0, 2000.0))),
                 ..egui::RawInput::default()
@@ -879,6 +881,8 @@ mod tests {
         for scale in [1.0f32, 1.25, 1.5] {
             let ctx = Context::default();
             let mut gallery = Gallery::new(&ctx);
+            // Specimens are checked as drawn once settled.
+            widgets::motion::set_enabled(&ctx, false);
             let mut input = egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(1100.0, 2000.0))),
                 ..egui::RawInput::default()

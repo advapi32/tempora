@@ -44,6 +44,13 @@ pub(super) enum DayZoom {
     Active,
     FullDay,
     Evening,
+    /// A span picked on the lane or reached by zooming and panning it, as local clock times
+    /// in milliseconds after midnight, so stepping to another day keeps the same hours, even
+    /// across a daylight saving change.
+    Custom {
+        from: i64,
+        to: i64,
+    },
 }
 
 /// Everything a Back press restores.
@@ -62,8 +69,32 @@ pub(super) struct View {
     pub overview_table: bool,
     pub trend_table: bool,
     pub zoom: DayZoom,
+    /// The preset a custom zoom goes back to when it is reset.
+    pub zoom_base: DayZoom,
     /// App highlighted on the Day page.
     pub lane_app: Option<String>,
+}
+
+impl View {
+    /// Shows a new lane zoom. Leaving a preset for a custom span remembers the preset.
+    pub fn set_zoom(&mut self, zoom: DayZoom) {
+        if !matches!(self.zoom, DayZoom::Custom { .. }) {
+            self.zoom_base = self.zoom;
+        }
+        self.zoom = zoom;
+    }
+
+    /// Whether the lane shows a custom span rather than a preset.
+    pub fn zoomed(&self) -> bool {
+        matches!(self.zoom, DayZoom::Custom { .. })
+    }
+
+    /// Goes back from a custom span to the preset it was zoomed from.
+    pub fn reset_zoom(&mut self) {
+        if self.zoomed() {
+            self.zoom = self.zoom_base;
+        }
+    }
 }
 
 /// Most page visits kept for each of the back and forward history stacks.
@@ -95,6 +126,7 @@ impl Nav {
             overview_table: false,
             trend_table: false,
             zoom: DayZoom::Active,
+            zoom_base: DayZoom::Active,
             lane_app: None,
         };
         Self {
@@ -369,6 +401,23 @@ mod tests {
         assert!(nav.go_back());
         assert_eq!(nav.view, origin);
         assert!(!nav.go_back());
+    }
+
+    #[test]
+    fn resetting_a_custom_zoom_returns_to_the_preset_it_left() {
+        let mut nav = Nav::new(date(11, 20), Weekday::Mon);
+        nav.view.set_zoom(DayZoom::Evening);
+        nav.view.set_zoom(DayZoom::Custom { from: 1, to: 2 });
+        nav.view.set_zoom(DayZoom::Custom { from: 1, to: 3 });
+        assert!(nav.view.zoomed());
+        nav.view.reset_zoom();
+        assert_eq!(
+            nav.view.zoom,
+            DayZoom::Evening,
+            "back past every nested zoom"
+        );
+        nav.view.reset_zoom();
+        assert_eq!(nav.view.zoom, DayZoom::Evening, "a preset stays put");
     }
 
     #[test]
