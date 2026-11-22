@@ -79,6 +79,18 @@ impl<K: Clone + PartialEq, V> Cached<K, V> {
             .map(|(_, value)| value)
     }
 
+    /// The value for `key`, or until `key` has one, the last value loaded for any key, with
+    /// the key it belongs to. A page keeps that content while the next one loads instead of
+    /// flashing empty, and draws it for its own key. A key that failed to load shows nothing.
+    pub fn shown(&self, key: &K) -> Option<(&K, &V)> {
+        match &self.loaded {
+            Some((loaded, value)) if loaded == key || self.error(key).is_none() => {
+                Some((loaded, value))
+            }
+            _ => None,
+        }
+    }
+
     pub fn error(&self, key: &K) -> Option<&str> {
         self.error
             .as_ref()
@@ -181,6 +193,7 @@ pub(super) struct Dashboard {
 impl Dashboard {
     pub fn new(context: &eframe::CreationContext<'_>) -> Self {
         theme::setup(&context.egui_ctx);
+        widgets::motion::set_enabled(&context.egui_ctx, tempora::win::animations_enabled());
         caption::install(context);
         let prefs = Preferences::load(context.storage);
         prefs.apply(&context.egui_ctx);
@@ -250,10 +263,12 @@ impl Dashboard {
         }
     }
 
-    /// A dashboard with no worker, for headless rendering tests.
+    /// A dashboard with no worker, for headless rendering tests. Motion is off, so each
+    /// frame draws settled values; tests that check animations turn it back on.
     #[cfg(test)]
     pub(super) fn for_test(ctx: &egui::Context) -> Self {
         theme::setup(ctx);
+        widgets::motion::set_enabled(ctx, false);
         let (jobs, _) = mpsc::channel();
         let (_, updates) = mpsc::channel();
         Self::build(
@@ -305,10 +320,12 @@ impl Dashboard {
         }
     }
 
+    /// Extras for the shown range; like `current_report`, the previous ones while it loads.
     fn extras(&self) -> Option<Arc<Extras>> {
+        let key = self.report_key();
         self.extras
             .as_ref()
-            .filter(|(key, _)| *key == self.report_key())
+            .filter(|(loaded, _)| *loaded == key || self.report.error(&key).is_none())
             .map(|(_, extras)| extras.clone())
     }
 
@@ -316,8 +333,32 @@ impl Dashboard {
         (self.nav.view.range, self.nav.view.exclude_idle)
     }
 
+    /// The report for the shown range, or the previous one while it loads.
     pub(super) fn current_report(&self) -> Option<Arc<Report>> {
-        self.report.get(&self.report_key()).cloned()
+        self.report
+            .shown(&self.report_key())
+            .map(|(_, report)| report.clone())
+    }
+
+    /// The label for the range the report on screen covers: the selected range, or while the
+    /// next one loads, the previous range that report belongs to. Captions that describe the
+    /// data use this, so old numbers are never labelled with the new dates.
+    pub(super) fn report_range_label(&self) -> String {
+        let key = self.report_key();
+        match self.report.shown(&key) {
+            Some((loaded, _)) if *loaded != key => {
+                format::range_label(loaded.0, nav::Period::Custom)
+            }
+            _ => format::range_label(self.nav.view.range, self.nav.view.period),
+        }
+    }
+
+    /// Whether `current_report` is still the previous range's.
+    pub(super) fn report_is_stale(&self) -> bool {
+        let key = self.report_key();
+        self.report
+            .shown(&key)
+            .is_some_and(|(loaded, _)| *loaded != key)
     }
 
     fn info(&self, key: &str) -> Option<Arc<AppInfo>> {
@@ -581,6 +622,14 @@ impl eframe::App for Dashboard {
         if now >= self.next_refresh {
             self.request_status();
             self.next_refresh = now + STATUS_PERIOD;
+            // Follows Windows' "Animation effects" setting when it changes while open.
+            #[cfg(not(test))]
+            {
+                let animate = tempora::win::animations_enabled();
+                if animate != widgets::motion::enabled(context) {
+                    widgets::motion::set_enabled(context, animate);
+                }
+            }
         }
         if now >= self.next_poll {
             self.send(Job::Poll);
@@ -710,6 +759,11 @@ mod tests {
         assert!(!cache.needs(&2), "one request in flight");
         cache.finish(1, Ok("one"));
         assert_eq!(cache.get(&2), None);
+        assert_eq!(
+            cache.shown(&2),
+            Some((&1, &"one")),
+            "the last value stays up while 2 loads"
+        );
         assert!(cache.needs(&2));
         cache.finish(2, Ok("two"));
         assert!(!cache.needs(&2));
@@ -720,6 +774,17 @@ mod tests {
         assert_eq!(cache.get(&2), Some(&"two"));
         assert_eq!(cache.error(&2), Some("could not refresh"));
         assert_eq!(cache.error(&1), None);
+        assert_eq!(
+            cache.shown(&2),
+            Some((&2, &"two")),
+            "a failed refresh keeps its own value"
+        );
+        cache.finish(3, Err("could not load".into()));
+        assert_eq!(
+            cache.shown(&3),
+            None,
+            "a failed key never shows another key's value"
+        );
         assert!(!cache.needs(&2), "an error waits for the next invalidation");
     }
 }

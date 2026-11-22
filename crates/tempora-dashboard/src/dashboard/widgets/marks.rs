@@ -15,10 +15,16 @@ use super::{Tokens, glyph, snap};
 /// Thin progress bar: muted track, colored share.
 pub(in crate::dashboard) fn share_bar(ui: &mut Ui, fraction: f32, color: Color32, width: f32) {
     let colors = Tokens::get(ui);
-    let (rect, _) = ui.allocate_exact_size(vec2(width, 6.0), Sense::hover());
+    let (rect, response) = ui.allocate_exact_size(vec2(width, 6.0), Sense::hover());
+    let fraction = super::motion::tween(
+        ui.ctx(),
+        response.id,
+        fraction.clamp(0.0, 1.0),
+        super::motion::Ease::GROW,
+    );
     let rect = snap(ui, rect);
     ui.painter().rect_filled(rect, 3, colors.muted);
-    let filled = rect.width() * fraction.clamp(0.0, 1.0);
+    let filled = rect.width() * fraction;
     if filled > 0.0 {
         ui.painter().rect_filled(
             Rect::from_min_size(rect.min, vec2(filled.max(2.0), rect.height())),
@@ -46,7 +52,11 @@ pub(in crate::dashboard) fn live_dot(ui: &mut Ui) {
 }
 
 /// Legend entry: a swatch (or hatched box) and a caption label.
-pub(in crate::dashboard) fn legend_item(ui: &mut Ui, color: Option<Color32>, label: &str) {
+pub(in crate::dashboard) fn legend_item(
+    ui: &mut Ui,
+    color: Option<Color32>,
+    label: &str,
+) -> Response {
     let colors = Tokens::get(ui);
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
@@ -62,7 +72,8 @@ pub(in crate::dashboard) fn legend_item(ui: &mut Ui, color: Option<Color32>, lab
                 .size(Tokens::CAPTION)
                 .color(colors.fg_muted),
         );
-    });
+    })
+    .response
 }
 
 #[cfg_attr(not(debug_assertions), allow(dead_code))] // Shown in the debug-only gallery.

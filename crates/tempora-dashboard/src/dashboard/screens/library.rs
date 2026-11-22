@@ -146,6 +146,7 @@ impl Dashboard {
         let Some(report) = self.current_report() else {
             return;
         };
+        Self::dim_while_stale(ui, "library", self.report_is_stale());
         let extras = self.extras();
         let vm = library_vm(&report, &self.apps, &self.nav.view, extras.as_deref());
         if !vm.range_has_apps && self.nav.view.search.trim().is_empty() {

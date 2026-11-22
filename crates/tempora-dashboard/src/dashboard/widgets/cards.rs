@@ -6,6 +6,7 @@ use eframe::egui::{
 };
 
 use super::marks::{BadgeKind, badge};
+use super::motion;
 use super::share_bar;
 use super::{Tokens, snap};
 
@@ -78,6 +79,9 @@ pub(in crate::dashboard) struct Kpi<'a> {
     pub caption: Option<String>,
     /// Share bar before the caption: fraction and color.
     pub share: Option<(f32, Color32)>,
+    /// The duration `value` shows. When it changes, as when stepping to another week, the
+    /// value rolls from the old duration to the new one; it appears settled.
+    pub roll_ms: Option<i64>,
 }
 
 impl<'a> Kpi<'a> {
@@ -90,6 +94,7 @@ impl<'a> Kpi<'a> {
             delta: None,
             caption: None,
             share: None,
+            roll_ms: None,
         }
     }
 }
@@ -140,8 +145,25 @@ pub(in crate::dashboard) fn kpi_card(
 
 fn kpi_body(ui: &mut Ui, kpi: &Kpi<'_>, caption_row: bool) {
     let colors = Tokens::get(ui);
-    let (label, icon, value) = (kpi.label, kpi.icon, kpi.value.as_str());
+    let (label, icon) = (kpi.label, kpi.icon);
     card(ui, |ui| {
+        let value = match kpi.roll_ms {
+            Some(ms) => {
+                let minutes = ms as f32 / 60_000.0;
+                let shown = motion::tween(
+                    ui.ctx(),
+                    ui.id().with(("kpi-roll", label)),
+                    minutes,
+                    motion::Ease::FOLLOW,
+                );
+                if shown == minutes {
+                    kpi.value.clone()
+                } else {
+                    crate::dashboard::format::duration((shown * 60_000.0) as i64)
+                }
+            }
+            None => kpi.value.clone(),
+        };
         let width = ui.available_width();
         ui.set_min_width(width);
         ui.spacing_mut().item_spacing.y = 6.0;

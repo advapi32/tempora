@@ -37,6 +37,21 @@ pub(super) enum LibrarySort {
     LastSeen,
 }
 
+/// A local clock reading: milliseconds after midnight, and whether it is the second time
+/// the clock shows it on a day the clocks fall back.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(super) struct ClockTime {
+    pub ms: i64,
+    pub repeat: bool,
+}
+
+impl ClockTime {
+    /// A reading that isn't the second of a repeated hour.
+    pub const fn at(ms: i64) -> Self {
+        Self { ms, repeat: false }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(super) enum DayZoom {
     /// Whole hours around the day's recorded activity.
@@ -44,6 +59,15 @@ pub(super) enum DayZoom {
     Active,
     FullDay,
     Evening,
+    /// A span picked on the lane or reached by zooming and panning it, as local clock times,
+    /// so stepping to another day keeps the same hours, even across a daylight saving change.
+    Custom {
+        from: ClockTime,
+        to: ClockTime,
+        /// The span's length when picked. Endpoints picked on either side of an autumn clock
+        /// change can come out reversed on another day; the length keeps the span whole.
+        length: i64,
+    },
 }
 
 /// Everything a Back press restores.
@@ -62,8 +86,32 @@ pub(super) struct View {
     pub overview_table: bool,
     pub trend_table: bool,
     pub zoom: DayZoom,
+    /// The preset a custom zoom goes back to when it is reset.
+    pub zoom_base: DayZoom,
     /// App highlighted on the Day page.
     pub lane_app: Option<String>,
+}
+
+impl View {
+    /// Shows a new lane zoom. Leaving a preset for a custom span remembers the preset.
+    pub fn set_zoom(&mut self, zoom: DayZoom) {
+        if !matches!(self.zoom, DayZoom::Custom { .. }) {
+            self.zoom_base = self.zoom;
+        }
+        self.zoom = zoom;
+    }
+
+    /// Whether the lane shows a custom span rather than a preset.
+    pub fn zoomed(&self) -> bool {
+        matches!(self.zoom, DayZoom::Custom { .. })
+    }
+
+    /// Goes back from a custom span to the preset it was zoomed from.
+    pub fn reset_zoom(&mut self) {
+        if self.zoomed() {
+            self.zoom = self.zoom_base;
+        }
+    }
 }
 
 /// Most page visits kept for each of the back and forward history stacks.
@@ -95,6 +143,7 @@ impl Nav {
             overview_table: false,
             trend_table: false,
             zoom: DayZoom::Active,
+            zoom_base: DayZoom::Active,
             lane_app: None,
         };
         Self {
@@ -369,6 +418,31 @@ mod tests {
         assert!(nav.go_back());
         assert_eq!(nav.view, origin);
         assert!(!nav.go_back());
+    }
+
+    #[test]
+    fn resetting_a_custom_zoom_returns_to_the_preset_it_left() {
+        let mut nav = Nav::new(date(11, 20), Weekday::Mon);
+        nav.view.set_zoom(DayZoom::Evening);
+        nav.view.set_zoom(DayZoom::Custom {
+            from: ClockTime::at(1),
+            to: ClockTime::at(2),
+            length: 1,
+        });
+        nav.view.set_zoom(DayZoom::Custom {
+            from: ClockTime::at(1),
+            to: ClockTime::at(3),
+            length: 2,
+        });
+        assert!(nav.view.zoomed());
+        nav.view.reset_zoom();
+        assert_eq!(
+            nav.view.zoom,
+            DayZoom::Evening,
+            "back past every nested zoom"
+        );
+        nav.view.reset_zoom();
+        assert_eq!(nav.view.zoom, DayZoom::Evening, "a preset stays put");
     }
 
     #[test]

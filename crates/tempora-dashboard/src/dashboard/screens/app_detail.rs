@@ -211,6 +211,7 @@ impl Dashboard {
         }
         let mut action = self.detail_header(ui, &vm);
         self.report_status(ui);
+        Self::dim_while_stale(ui, "app-detail", self.report_is_stale());
         if let Some(range) = &vm.range {
             let kpis = detail_kpis(range, self.zone, self.today());
             widgets::kpi_grid(ui, &kpis, if wide { 5 } else { 3 });
@@ -229,7 +230,7 @@ impl Dashboard {
         };
         let ungroup_blocked = correction_blocked(CAPABILITY_UNGROUP_APP);
         let reset_blocked = correction_blocked(CAPABILITY_RESET_APP);
-        let range_label = format::range_label(self.nav.view.range, self.nav.view.period);
+        let range_label = self.report_range_label();
         let main = |ui: &mut Ui, this: &mut Self| -> Option<DetailAction> {
             match &vm.range {
                 Some(range) => {
@@ -238,7 +239,7 @@ impl Dashboard {
                     trend.or(sessions)
                 }
                 None => {
-                    let label = format::range_label(this.nav.view.range, this.nav.view.period);
+                    let label = this.report_range_label();
                     widgets::empty_state(
                         ui,
                         "No activity in this range",
@@ -494,7 +495,7 @@ impl Dashboard {
                     format!(
                         "{}, days with activity in {}",
                         vm.name,
-                        format::range_label(self.nav.view.range, self.nav.view.period)
+                        self.report_range_label()
                     ),
                     Tokens::CAPTION,
                     colors.fg_subtle,
@@ -580,11 +581,7 @@ impl Dashboard {
                 crate::dashboard::theme::section(ui, "Sessions");
                 ui.label(
                     widgets::mono(
-                        format!(
-                            "{} in {}",
-                            range.sessions,
-                            format::range_label(self.nav.view.range, self.nav.view.period)
-                        ),
+                        format!("{} in {}", range.sessions, self.report_range_label()),
                         Tokens::CAPTION,
                     )
                     .color(colors.fg_subtle),
@@ -698,6 +695,10 @@ fn detail_kpis<'a>(range: &RangeVm, zone: Tz, today: NaiveDate) -> [Kpi<'a>; 5] 
         caption: Some(caption),
         ..Kpi::new(label, icon, value)
     };
+    let duration = |label, icon, ms: i64, caption: &str| Kpi {
+        roll_ms: Some(ms),
+        ..kpi(label, icon, format::duration(ms), caption.to_owned())
+    };
     let seen_day = format::local_date(range.last_seen_ms, zone);
     let seen = last_seen(range.last_seen_ms, zone, today);
     let (seen_value, seen_caption) = if seen_day == Some(today) {
@@ -709,23 +710,18 @@ fn detail_kpis<'a>(range: &RangeVm, zone: Tz, today: NaiveDate) -> [Kpi<'a>; 5] 
         (seen, format::local(range.last_seen_ms, zone, "%H:%M"))
     };
     [
-        kpi(
+        duration(
             "Focused",
             icons::CLOCK,
-            format::duration(range.focused_ms),
-            "In the foreground".into(),
+            range.focused_ms,
+            "In the foreground",
         ),
-        kpi(
-            "Running",
-            icons::PLAY,
-            format::duration(range.running_ms),
-            "Any process open".into(),
-        ),
-        kpi(
+        duration("Running", icons::PLAY, range.running_ms, "Any process open"),
+        duration(
             "Background",
             icons::STACK,
-            format::duration(range.background_ms),
-            "Another app had focus".into(),
+            range.background_ms,
+            "Another app had focus",
         ),
         kpi(
             "Sessions",

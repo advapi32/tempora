@@ -8,7 +8,7 @@ use chrono_tz::Tz;
 use tempora::storage::{Report, TimelineKind};
 
 use crate::dashboard::format;
-use crate::dashboard::nav::DayZoom;
+use crate::dashboard::nav::{ClockTime, DayZoom};
 use crate::dashboard::theme::Tokens;
 
 pub(super) const MINUTE: i64 = 60_000;
@@ -41,6 +41,9 @@ pub(super) const TICK_STEPS: [i64; 8] = [
 
 /// The most tick intervals a lane axis shows.
 pub(super) const MAX_TICK_INTERVALS: i64 = 8;
+
+/// The narrowest the lane zooms to.
+pub(super) const MIN_ZOOM: i64 = 10 * MINUTE;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(in crate::dashboard) enum BlockKind {
@@ -76,6 +79,9 @@ pub(in crate::dashboard) struct DayApp {
 
 pub(in crate::dashboard) struct DayVm {
     pub day: (i64, i64),
+    /// The calendar day and the zone it is in, for turning clock times into instants.
+    pub date: NaiveDate,
+    pub zone: Tz,
     pub focused_ms: i64,
     pub unknown_ms: i64,
     pub gaps_ms: i64,
@@ -158,6 +164,8 @@ pub(in crate::dashboard) fn day_vm(report: &Report, date: NaiveDate, zone: Tz) -
     });
     DayVm {
         day,
+        date,
+        zone,
         focused_ms: report
             .categories
             .iter()
@@ -292,7 +300,19 @@ pub(super) fn other_focus_ms(apps: &[DayApp], palette: &HashMap<String, usize>) 
 pub(super) fn window(vm: &DayVm, zoom: DayZoom) -> (i64, i64) {
     match zoom {
         DayZoom::FullDay => vm.day,
-        DayZoom::Evening => ((vm.day.0 + 17 * HOUR).min(vm.day.1), vm.day.1),
+        DayZoom::Custom { from, to, length } => {
+            let start = format::clock_instant(vm.date, from.ms, from.repeat, vm.zone);
+            let end = format::clock_instant(vm.date, to.ms, to.repeat, vm.zone);
+            fit(
+                start,
+                if end > start { end - start } else { length },
+                vm.day,
+            )
+        }
+        DayZoom::Evening => (
+            format::clock_instant(vm.date, 17 * HOUR, false, vm.zone).min(vm.day.1),
+            vm.day.1,
+        ),
         DayZoom::Active => {
             let (first, last) = vm
                 .foreground
@@ -321,30 +341,109 @@ pub(super) fn window(vm: &DayVm, zoom: DayZoom) -> (i64, i64) {
     }
 }
 
-/// Tick labels across the window: the finest step from 5 minutes to 6 hours that gives at
-/// most eight intervals. Labels are `HH:MM` under an hour's step, `HH` otherwise.
-pub(super) fn ticks(window: (i64, i64), day_start: i64) -> Vec<(f32, String)> {
+/// A window `span` long starting near `start`, at least `MIN_ZOOM` and at most the day, moved
+/// inside the day if it would stick out.
+pub(super) fn fit(start: i64, span: i64, day: (i64, i64)) -> (i64, i64) {
+    let length = (day.1 - day.0).max(1);
+    let span = span.clamp(MIN_ZOOM.min(length), length);
+    let start = start.clamp(day.0, day.1 - span);
+    (start, start + span)
+}
+
+/// `window` zoomed by `factor` (above 1 zooms in) so that `pivot` stays at lane position `at`.
+pub(super) fn zoom_window(
+    window: (i64, i64),
+    day: (i64, i64),
+    pivot: i64,
+    at: f32,
+    factor: f32,
+) -> (i64, i64) {
+    let span = ((window.1 - window.0) as f64 / f64::from(factor.max(0.01))).round() as i64;
+    let span = span.clamp(MIN_ZOOM.min(day.1 - day.0), day.1 - day.0);
+    fit(
+        pivot - (span as f64 * f64::from(at)).round() as i64,
+        span,
+        day,
+    )
+}
+
+/// `window` moved later by `by` milliseconds, or earlier when negative, staying inside the day.
+pub(super) fn pan_window(window: (i64, i64), day: (i64, i64), by: i64) -> (i64, i64) {
+    fit(window.0 + by, window.1 - window.0, day)
+}
+
+/// The zoom that shows `window`, a custom span in clock times. `preset` is the preset the
+/// lane would reset to; zooming out to the whole day from 24 hours is just that preset again,
+/// but from any other preset it stays a custom span, so a reset still goes back to it.
+pub(super) fn zoom_for(window: (i64, i64), vm: &DayVm, preset: DayZoom) -> DayZoom {
+    if window == vm.day && preset == DayZoom::FullDay {
+        DayZoom::FullDay
+    } else {
+        DayZoom::Custom {
+            from: clock(window.0, vm),
+            to: clock(window.1, vm),
+            length: window.1 - window.0,
+        }
+    }
+}
+
+/// What the clock reads at `instant` during the day, with the day's end as 24:00, and
+/// whether it is the second time it reads that on a day the clocks fall back.
+fn clock(instant: i64, vm: &DayVm) -> ClockTime {
+    if instant >= vm.day.1 {
+        return ClockTime::at(24 * HOUR);
+    }
+    if instant <= vm.day.0 {
+        return ClockTime::at(0);
+    }
+    let ms = format::clock_ms(instant, vm.zone);
+    let instants = format::clock_instants(vm.date, ms, vm.zone);
+    ClockTime {
+        ms,
+        repeat: instants.len() == 2 && instants[1] == instant,
+    }
+}
+
+/// Tick times and labels across the window: the finest step from 5 minutes to 6 hours that
+/// gives at most eight intervals. Ticks fall on whole clock times, labelled `HH:MM` under an
+/// hour's step and `HH` otherwise. On a daylight saving day a skipped time gets no tick and a
+/// repeated one gets a tick for each occurrence, so labels agree with the pointer's readout.
+pub(super) fn tick_times(window: (i64, i64), vm: &DayVm) -> Vec<(i64, String)> {
     let span = (window.1 - window.0).max(1);
     let step = TICK_STEPS
         .into_iter()
         .find(|&step| (span + step - 1) / step <= MAX_TICK_INTERVALS)
         .unwrap_or(6 * HOUR);
-    let first = day_start + (window.0 - day_start).div_euclid(step) * step;
-    let mut ticks = Vec::new();
-    let mut at = if first < window.0 {
-        first + step
-    } else {
-        first
-    };
-    while at <= window.1 {
-        let minutes = (at - day_start) / MINUTE;
-        let label = if step < HOUR {
-            format!("{:02}:{:02}", minutes / 60, minutes % 60)
-        } else {
-            format!("{:02}", minutes / 60)
-        };
-        ticks.push(((at - window.0) as f32 / span as f32, label));
-        at += step;
-    }
+    let mut ticks: Vec<(i64, String)> = (0..=24 * HOUR / step)
+        .map(|index| index * step)
+        .flat_map(|reading| {
+            let minutes = reading / MINUTE;
+            let label = if step < HOUR {
+                format!("{:02}:{:02}", minutes / 60, minutes % 60)
+            } else {
+                format!("{:02}", minutes / 60)
+            };
+            format::clock_instants(vm.date, reading, vm.zone)
+                .into_iter()
+                .filter(|at| (window.0..=window.1).contains(at))
+                .map(move |at| (at, label.clone()))
+        })
+        .collect();
+    ticks.sort_by_key(|(at, _)| *at);
+    ticks.dedup_by_key(|(at, _)| *at);
     ticks
+}
+
+/// Tick labels across the window, at their positions in it.
+#[cfg(test)]
+pub(super) fn ticks(window: (i64, i64), vm: &DayVm) -> Vec<(f32, String)> {
+    tick_times(window, vm)
+        .into_iter()
+        .map(|(at, label)| (position(at, window), label))
+        .collect()
+}
+
+/// Where `ms` falls in `window`, 0 at its start and 1 at its end.
+pub(super) fn position(ms: i64, window: (i64, i64)) -> f32 {
+    ((ms - window.0) as f64 / (window.1 - window.0).max(1) as f64) as f32
 }

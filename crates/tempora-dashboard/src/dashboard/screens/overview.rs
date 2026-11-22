@@ -236,6 +236,7 @@ impl Dashboard {
         let Some(report) = self.current_report() else {
             return;
         };
+        Self::dim_while_stale(ui, "overview", self.report_is_stale());
         let threshold = self
             .recorder
             .as_ref()
@@ -314,17 +315,20 @@ impl Dashboard {
             widgets::section_header(
                 ui,
                 "Focused time by day",
-                Some("Select a day to open its timeline. Select a category to filter."),
+                Some(
+                    "Select a day to open its timeline, or drag across days to total them.                      Select a category to filter.",
+                ),
                 |ui| {
                     widgets::segmented(ui, &mut table, &[(false, "Chart"), (true, "Table")]);
                 },
             );
             self.nav.view.overview_table = table;
-            self.category_chips(ui, vm);
+            // A hovered chip previews its filter in the chart.
+            let previewed = self.category_chips(ui, vm);
             let opened = if table {
-                day_table(ui, vm, self.nav.view.range, self.nav.view.period)
+                day_table(ui, vm, &self.report_range_label())
             } else {
-                day_chart(ui, vm, self.nav.view.category, plot)
+                day_chart(ui, vm, previewed.or(self.nav.view.category), plot)
             };
             if let Some(date) = opened {
                 self.nav.drill(Page::Day(date));
@@ -332,9 +336,11 @@ impl Dashboard {
         });
     }
 
-    fn category_chips(&mut self, ui: &mut Ui, vm: &OverviewVm) {
+    /// The chips that filter by category. Returns the chip under the pointer.
+    fn category_chips(&mut self, ui: &mut Ui, vm: &OverviewVm) -> Option<Category> {
         let colors = Tokens::get(ui);
         let selected = self.nav.view.category;
+        let mut hovered = None;
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = vec2(Tokens::CONTROL_GAP, Tokens::CONTROL_GAP);
             for (category, focused) in &vm.chips {
@@ -347,11 +353,15 @@ impl Dashboard {
                     on,
                     selected.is_some(),
                 );
+                if chip.hovered() {
+                    hovered = Some(*category);
+                }
                 if chip.clicked() {
                     self.nav.view.category = if on { None } else { Some(*category) };
                 }
             }
         });
+        hovered
     }
 
     fn top_apps(&mut self, ui: &mut Ui, vm: &OverviewVm) {
@@ -508,6 +518,7 @@ fn kpis<'a>(vm: &OverviewVm, colors: &Tokens) -> [Kpi<'a>; 4] {
     };
     [
         Kpi {
+            roll_ms: Some(vm.focused_ms),
             delta: vm.focused_delta.clone(),
             caption: vm.delta_caption.clone(),
             ..Kpi::new(
@@ -517,6 +528,7 @@ fn kpis<'a>(vm: &OverviewVm, colors: &Tokens) -> [Kpi<'a>; 4] {
             )
         },
         Kpi {
+            roll_ms: Some(vm.average_ms),
             caption: Some(match vm.active_days {
                 0 => "No days with activity".into(),
                 1 => format!("1 day with activity{in_progress}"),
@@ -529,6 +541,7 @@ fn kpis<'a>(vm: &OverviewVm, colors: &Tokens) -> [Kpi<'a>; 4] {
             )
         },
         Kpi {
+            roll_ms: Some(vm.gaming_ms),
             share: vm
                 .gaming_share
                 .map(|share| (share as f32 / 100.0, colors.category(Category::Games))),
@@ -542,6 +555,7 @@ fn kpis<'a>(vm: &OverviewVm, colors: &Tokens) -> [Kpi<'a>; 4] {
             )
         },
         Kpi {
+            roll_ms: Some(vm.idle_ms),
             caption: Some(if vm.idle_excluded {
                 "Excluded from the totals on this page".into()
             } else {
@@ -599,12 +613,7 @@ fn day_chart(ui: &mut Ui, vm: &OverviewVm, only: Option<Category>, plot: f32) ->
 }
 
 /// The chart's text equivalent: focused time per day and category.
-fn day_table(
-    ui: &mut Ui,
-    vm: &OverviewVm,
-    range: tempora::model::DateRange,
-    period: Period,
-) -> Option<NaiveDate> {
+fn day_table(ui: &mut Ui, vm: &OverviewVm, range_label: &str) -> Option<NaiveDate> {
     let colors = Tokens::get(ui);
     let categories: Vec<Category> = vm.chips.iter().map(|(category, _)| *category).collect();
     let width = ui.available_width();
@@ -617,10 +626,7 @@ fn day_table(
     specs.push(Column::new("Total", Width::Fixed(80.0), Align::Max));
     let columns = widgets::scrolled_columns(ui, width, &specs);
     ui.label(widgets::text(
-        format!(
-            "Focused time per day and category, {}",
-            format::range_label(range, period)
-        ),
+        format!("Focused time per day and category, {}", range_label),
         Tokens::CAPTION,
         colors.fg_subtle,
     ));

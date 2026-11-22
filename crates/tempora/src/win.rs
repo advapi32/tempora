@@ -45,8 +45,8 @@ use windows_sys::Win32::{
             AllowSetForegroundWindow, EnumChildWindows, EnumWindows, GW_OWNER, GWL_EXSTYLE,
             GWL_STYLE, GetClassNameW, GetDesktopWindow, GetForegroundWindow, GetShellWindow,
             GetWindow, GetWindowLongW, GetWindowRect, GetWindowThreadProcessId, IsIconic,
-            IsWindowVisible, PostMessageW, SW_RESTORE, SetForegroundWindow, ShowWindowAsync,
-            WM_CLOSE,
+            IsWindowVisible, PostMessageW, SPI_GETCLIENTAREAANIMATION, SW_RESTORE,
+            SetForegroundWindow, ShowWindowAsync, SystemParametersInfoW, WM_CLOSE,
         },
     },
 };
@@ -389,4 +389,16 @@ pub fn input_ticks() -> Option<(u64, u32)> {
     // SAFETY: No arguments.
     let now = unsafe { GetTickCount64() };
     Some((now, info.dwTime))
+}
+
+/// Whether Windows' "Animation effects" setting (Accessibility > Visual effects) is on.
+/// Assumes it is when the setting can't be read.
+pub fn animations_enabled() -> bool {
+    let mut enabled: i32 = 1;
+    // SAFETY: SPI_GETCLIENTAREAANIMATION writes one BOOL through the pointer, which points at a
+    // live i32 for the whole call.
+    let read = unsafe {
+        SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, (&raw mut enabled).cast(), 0)
+    };
+    read == 0 || enabled != 0
 }

@@ -7,6 +7,7 @@ mod feedback;
 mod inputs;
 mod layout;
 mod marks;
+pub(in crate::dashboard) mod motion;
 mod overlays;
 mod popup;
 mod table;

@@ -100,6 +100,17 @@ impl Dashboard {
                                     self.recorder_banner(ui);
                                     self.first_run_page(ui, wide);
                                 } else {
+                                    // Each page, and each day on the Day page, fades in.
+                                    let fade = widgets::motion::tween(
+                                        ctx,
+                                        egui::Id::new(("page-fade", self.nav.page())),
+                                        1.0,
+                                        widgets::motion::Ease {
+                                            enter: widgets::motion::PAGE,
+                                            ..widgets::motion::Ease::GROW
+                                        },
+                                    );
+                                    ui.multiply_opacity(fade);
                                     self.page_heading(ui);
                                     self.recorder_banner(ui);
                                     self.content(ui, wide);
@@ -324,6 +335,14 @@ impl Dashboard {
                 ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
             }
         }
+        // With the window hook, Windows takes presses on the bar's empty space itself (see
+        // `caption`), and the drag handling above only runs without it. Nothing is claimed
+        // while a popup or dialog is open, so a click on the bar still dismisses it.
+        if super::caption::installed() {
+            let open =
+                self.popup.is_some() || self.dialog.is_some() || egui::Popup::is_any_open(ctx);
+            publish_caption(ctx, &caption, !open);
+        }
     }
 
     fn open_search(&mut self, ctx: &Context) {
@@ -412,8 +431,11 @@ impl Dashboard {
         }
         let today = Local::now().date_naive();
         let range = self.nav.view.range;
+        // Only this range's report: the previous one, still drawn while this one loads,
+        // could pick a day outside the range.
         let date = self
-            .current_report()
+            .report
+            .get(&self.report_key())
             .and_then(|report| {
                 report
                     .days
@@ -761,6 +783,49 @@ fn toggle_maximized(ctx: &Context) {
     ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
 }
 
+/// Tells the window hook where the title bar's empty space is: the bar minus its controls,
+/// anything drawn over it, and the resize edges.
+fn publish_caption(ctx: &Context, caption: &egui::Response, claim: bool) {
+    let pixels_per_point = ctx.pixels_per_point();
+    if !claim {
+        super::caption::set_caption(egui::Rect::NOTHING, &[], pixels_per_point);
+        return;
+    }
+    let maximized = ctx.input(|input| input.viewport().maximized.unwrap_or(false));
+    let mut area = caption.interact_rect;
+    let mut holes = Vec::new();
+    if !maximized {
+        // The edges and top corners resize the window; see `resize_edges`.
+        area.min.y += RESIZE_EDGE;
+        area.min.x += RESIZE_EDGE;
+        area.max.x -= RESIZE_EDGE;
+        let window = ctx.content_rect();
+        let corner = vec2(RESIZE_CORNER, RESIZE_CORNER);
+        holes.push(egui::Rect::from_min_size(window.left_top(), corner));
+        holes.push(egui::Rect::from_min_size(
+            window.right_top() - vec2(RESIZE_CORNER, 0.0),
+            corner,
+        ));
+    }
+    ctx.viewport(|viewport| {
+        holes.extend(
+            viewport
+                .prev_pass
+                .widgets
+                .layers()
+                .flat_map(|(_, widgets)| widgets.iter())
+                .filter(|widget| {
+                    widget.id != caption.id
+                        && widget.enabled
+                        && widget.sense.interactive()
+                        && widget.interact_rect.intersects(area)
+                })
+                .map(|widget| widget.interact_rect),
+        );
+    });
+    super::caption::set_caption(area, &holes, pixels_per_point);
+}
+
 /// The window has no frame, so its edges resize it: the cursor changes near an edge and a
 /// press there hands the resize to Windows. Runs after the page so its cursor wins.
 pub(super) fn resize_edges(ctx: &Context) {
@@ -863,6 +928,43 @@ fn lanes_mark(painter: &egui::Painter, rect: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn timeline_opens_a_day_in_the_selected_range_while_its_report_loads() {
+        use crate::dashboard::nav::{Period, period_range};
+        use tempora::storage::{DaySummary, Report};
+        let ctx = egui::Context::default();
+        let mut dashboard = Dashboard::for_test(&ctx);
+        let today = Local::now().date_naive();
+        let week_start = dashboard.prefs.week_start;
+        // Last week is loaded, with activity on its last day.
+        let last_week = period_range(Period::Week, today - chrono::Days::new(7), week_start);
+        dashboard.nav.set_range(Period::Week, last_week);
+        let report = Report {
+            apps: Vec::new(),
+            categories: Vec::new(),
+            days: vec![DaySummary {
+                date: last_week.end,
+                categories: Vec::new(),
+                covered_ms: 1,
+            }],
+            timeline: Vec::new(),
+            coverage: Some((0, 1)),
+        };
+        dashboard
+            .report
+            .finish((last_week, false), Ok(std::sync::Arc::new(report)));
+        // Stepping to this week, whose report hasn't arrived yet.
+        let this_week = period_range(Period::Week, today, week_start);
+        dashboard.nav.set_range(Period::Week, this_week);
+        let Page::Day(date) = dashboard.timeline_page() else {
+            panic!("Timeline opens a day");
+        };
+        assert!(
+            this_week.start <= date && date <= this_week.end,
+            "{date} is outside {this_week:?}"
+        );
+    }
 
     #[test]
     fn search_parses_dates_without_a_year_into_the_past() {

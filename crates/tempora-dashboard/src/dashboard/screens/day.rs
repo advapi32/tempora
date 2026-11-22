@@ -9,7 +9,9 @@ mod this_day;
 use std::collections::HashMap;
 
 use chrono::NaiveDate;
-use eframe::egui::{Align, Layout, Rect, RichText, Sense, Ui, UiBuilder, vec2};
+use eframe::egui::{
+    self, Align, Layout, Rect, RichText, Sense, Ui, UiBuilder, WidgetInfo, WidgetType, vec2,
+};
 use egui_phosphor::regular as icons;
 
 use activity::{ActivityRow, Stretch, activity_rows};
@@ -21,6 +23,7 @@ use this_day::*;
 use super::pointer_anchor;
 use crate::dashboard::nav::{DayZoom, Page, Period, View};
 use crate::dashboard::theme::Tokens;
+use crate::dashboard::widgets::motion::{self, Ease};
 use crate::dashboard::widgets::{self, Button, ButtonKind, LaneBlock};
 use crate::dashboard::{Dashboard, format};
 
@@ -59,6 +62,8 @@ enum DayAction {
     /// The app menu for a key, anchored at the pointer.
     Menu(String, Rect),
     Edit(String),
+    /// A new lane zoom, from a pick, the wheel or a pan.
+    Zoom(DayZoom),
 }
 
 impl Dashboard {
@@ -72,10 +77,16 @@ impl Dashboard {
             action = Some(DayAction::Crumb);
         }
         let key = (date, self.nav.view.exclude_idle);
-        let report = self.day_report.get(&key).cloned();
-        let vm = report
+        // The previous day stays up while this one loads, drawn as the day it is.
+        let shown = self
+            .day_report
+            .shown(&key)
+            .map(|(loaded, report)| (loaded.0, report.clone()));
+        let stale = shown.as_ref().is_some_and(|(loaded, _)| *loaded != date);
+        let report = shown.as_ref().map(|(_, report)| report.clone());
+        let vm = shown
             .as_ref()
-            .map(|report| day_vm(report, date, self.zone));
+            .map(|(loaded, report)| day_vm(report, *loaded, self.zone));
         let today = self.today();
         let online = self.recorder_online();
         ui.horizontal(|ui| {
@@ -112,23 +123,28 @@ impl Dashboard {
             }
             if let Some(vm) = &vm {
                 ui.add_space(8.0);
-                for (index, (value, label)) in [(vm.focused_ms, "focused"), (vm.gaps_ms, "in gaps")]
-                    .into_iter()
-                    .enumerate()
-                {
-                    let number = ui.label(
-                        RichText::new(format::duration(value))
-                            .font(Tokens::mono_medium(Tokens::SECONDARY)),
-                    );
-                    if index == 0 && vm.unknown_ms >= MINUTE {
-                        number.on_hover_text(format!(
-                            "Another {} couldn't be attributed to an app.",
-                            format::duration(vm.unknown_ms)
-                        ));
+                // Scoped, so only the totals fade and the zoom presets beside them stay crisp.
+                ui.scope(|ui| {
+                    Self::dim_while_stale(ui, "day-totals", stale);
+                    for (index, (value, label)) in
+                        [(vm.focused_ms, "focused"), (vm.gaps_ms, "in gaps")]
+                            .into_iter()
+                            .enumerate()
+                    {
+                        let number = ui.label(
+                            RichText::new(format::duration(value))
+                                .font(Tokens::mono_medium(Tokens::SECONDARY)),
+                        );
+                        if index == 0 && vm.unknown_ms >= MINUTE {
+                            number.on_hover_text(format!(
+                                "Another {} couldn't be attributed to an app.",
+                                format::duration(vm.unknown_ms)
+                            ));
+                        }
+                        ui.label(widgets::text(label, Tokens::SECONDARY, colors.fg_muted));
+                        ui.add_space(8.0);
                     }
-                    ui.label(widgets::text(label, Tokens::SECONDARY, colors.fg_muted));
-                    ui.add_space(8.0);
-                }
+                });
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let mut zoom = self.nav.view.zoom;
@@ -141,9 +157,12 @@ impl Dashboard {
                         (DayZoom::Evening, "Evening"),
                     ],
                 );
-                self.nav.view.zoom = zoom;
+                if zoom != self.nav.view.zoom {
+                    self.nav.view.set_zoom(zoom);
+                }
             });
         });
+        Self::dim_while_stale(ui, "day-body", stale);
         if let Some(error) = self.day_report.error(&key) {
             widgets::banner(
                 ui,
@@ -246,6 +265,7 @@ impl Dashboard {
             Some(DayAction::Menu(key, anchor)) => self.toggle_app_menu(key, anchor),
             // Only produced while the recorder is online (see `row_action`).
             Some(DayAction::Edit(key)) => self.open_edit(&key),
+            Some(DayAction::Zoom(zoom)) => self.nav.view.set_zoom(zoom),
             None => {}
         }
     }
@@ -254,16 +274,36 @@ impl Dashboard {
         &mut self,
         ui: &mut Ui,
         vm: &DayVm,
-        (start, end): (i64, i64),
+        target: (i64, i64),
         palette: &HashMap<String, usize>,
         highlight: Option<&str>,
     ) -> Option<DayAction> {
         let colors = Tokens::get(ui);
-        let span = (end - start).max(1) as f32;
-        let at = |ms: i64| (ms - start) as f32 / span;
-        let ticks = ticks((start, end), vm.day.0);
+        let ctx = ui.ctx().clone();
+        let day_start = vm.day.0;
+        // The lane eases to a new zoom, so it glides rather than jumps.
+        let window_id = ui.id().with("lane-window");
+        let glide = |part: usize, ms: i64| {
+            let offset = motion::tween(
+                &ctx,
+                window_id.with(part),
+                (ms - day_start) as f32,
+                Ease::FOLLOW,
+            );
+            day_start + offset.round() as i64
+        };
+        let shown = (glide(0, target.0), glide(1, target.1));
+        let at = |ms: i64| position(ms, shown);
+        let ms_at = |at: f32| shown.0 + ((shown.1 - shown.0) as f64 * f64::from(at)).round() as i64;
+        // Labels for where the lane is going, placed where it is now.
+        let ticks: Vec<(f32, String)> = tick_times(target, vm)
+            .into_iter()
+            .map(|(ms, label)| (at(ms), label))
+            .collect();
         let tick_positions: Vec<f32> = ticks.iter().map(|(at, _)| *at).collect();
-        let visible = |block: &&BlockVm| block.end_ms > start && block.start_ms < end;
+        // Blocks in either window, so none pop in or out while the lane glides.
+        let reach = (shown.0.min(target.0), shown.1.max(target.1));
+        let visible = |block: &&BlockVm| block.end_ms > reach.0 && block.start_ms < reach.1;
         let zone = self.zone;
         let describe = |block: &BlockVm| {
             format!(
@@ -274,7 +314,31 @@ impl Dashboard {
                 format::duration(block.end_ms - block.start_ms)
             )
         };
+        // A legend entry under the pointer previews its highlight. The legend is drawn below
+        // the lane, so this frame uses what it reported last frame.
+        let preview_id = ui.id().with("legend-preview");
+        let previewed: Option<String> = ui.data(|data| data.get_temp(preview_id));
+        let shown_highlight = previewed.as_deref().or(highlight);
         let mut action = None;
+        let zoomed = self.nav.view.zoomed();
+        // The preset a reset would go back to.
+        let preset = if zoomed {
+            self.nav.view.zoom_base
+        } else {
+            self.nav.view.zoom
+        };
+        // The highlight before a click on the lane, so a double-click, whose two clicks each
+        // toggle it, can put it back.
+        let lane_app = self.nav.view.lane_app.clone();
+        let before_click = ui.id().with("highlight-before-click");
+        let now = ui.input(|input| input.time);
+        let mut restore_highlight = None;
+        let base = match self.nav.view.zoom_base {
+            DayZoom::FullDay => "24 hours",
+            DayZoom::Evening => "the evening",
+            DayZoom::Active | DayZoom::Custom { .. } => "active hours",
+        };
+        let mut reset = false;
         widgets::card(ui, |ui| {
             let width = ui.available_width();
             ui.set_min_width(width);
@@ -282,9 +346,26 @@ impl Dashboard {
             let lane_width = width;
             let mut clear_highlight = false;
             ui.spacing_mut().item_spacing.y = 14.0;
-            widgets::section_header(ui, "What you were using", None, |ui| {
+            let hint = if zoomed {
+                "Shift+scroll pans. Double-click or press Esc to zoom back out."
+            } else {
+                "Drag across the lane to zoom in. Ctrl+scroll zooms, Shift+scroll pans."
+            };
+            widgets::section_header(ui, "What you were using", Some(hint), |ui| {
                 // Always reserve the chip's height so highlighting doesn't shift the lane.
                 ui.allocate_exact_size(vec2(0.0, widgets::FILTER_CHIP_HEIGHT), Sense::hover());
+                if zoomed
+                    && ui
+                        .add(
+                            Button::new("Reset zoom", ButtonKind::Ghost)
+                                .small()
+                                .with_icon(icons::MAGNIFYING_GLASS_MINUS),
+                        )
+                        .on_hover_text(format!("Back to {base}"))
+                        .clicked()
+                {
+                    reset = true;
+                }
                 if let Some(name) = highlight
                     .and_then(|key| vm.apps.iter().find(|app| app.key == key))
                     .map(|app| app.name.as_str())
@@ -298,7 +379,7 @@ impl Dashboard {
             let visible_foreground: Vec<&BlockVm> = vm.foreground.iter().filter(visible).collect();
             // The app of each block, for a right-click; merged runs have none.
             let (foreground, foreground_apps): (Vec<LaneBlock>, Vec<Option<String>>) =
-                merge_slivers(&visible_foreground, (start, end), lane_width, SLIVER_PX)
+                merge_slivers(&visible_foreground, target, lane_width, SLIVER_PX)
                     .into_iter()
                     .map(|item| match item {
                         LaneItem::Block(block) => (
@@ -313,7 +394,7 @@ impl Dashboard {
                                     click_hint(block, highlight)
                                 ),
                                 tooltip: Some(block_tip(block, highlight, zone)),
-                                dimmed: is_dimmed(block, highlight),
+                                dimmed: is_dimmed(block, shown_highlight),
                             },
                             block.key.clone(),
                         ),
@@ -329,16 +410,28 @@ impl Dashboard {
                                 label: None,
                                 description: run_description(&run, zone),
                                 tooltip: Some(run_tip(&run, zone)),
-                                dimmed: is_dimmed(run.dominant, highlight),
+                                dimmed: is_dimmed(run.dominant, shown_highlight),
                             },
                             None,
                         ),
                     })
                     .unzip();
+            let time = |at: f32| format::local(ms_at(at), zone, "%H:%M");
+            let span = |from: f32, to: f32| {
+                let (start, end) = fit(ms_at(from), ms_at(to) - ms_at(from), vm.day);
+                format!(
+                    "{} · {}",
+                    span_label(start, end, zone, "%H:%M"),
+                    format::duration(end - start)
+                )
+            };
+            let scale = widgets::LaneScale {
+                time: &time,
+                span: &span,
+            };
             let track = ui.cursor().min;
-            let response = widgets::lane(ui, 44.0, &tick_positions, &foreground, None);
-            let foreground_clicked = response.clicked;
-            let foreground_context = response.context;
+            let response =
+                widgets::lane(ui, 44.0, &tick_positions, &foreground, None, Some(&scale));
             if foreground.is_empty() {
                 let rect = Rect::from_min_size(track, vec2(lane_width, 44.0));
                 ui.new_child(UiBuilder::new().max_rect(rect))
@@ -350,14 +443,22 @@ impl Dashboard {
                         ))
                     });
             }
-            if let Some((index, pos)) = foreground_context
+            if let Some((index, pos)) = response.context
                 && let Some(key) = foreground_apps[index].clone()
             {
                 action = Some(DayAction::Menu(key, pointer_anchor(pos)));
             }
-            if let Some(index) = foreground_clicked
+            if response.reset {
+                if let Some((at, previous)) =
+                    ui.data(|data| data.get_temp::<(f64, Option<String>)>(before_click))
+                    && now - at < 1.0
+                {
+                    restore_highlight = Some(previous);
+                }
+            } else if let Some(index) = response.clicked
                 && let Some(key) = foreground_apps[index].clone()
             {
+                ui.data_mut(|data| data.insert_temp(before_click, (now, lane_app.clone())));
                 let next = if highlight == Some(key.as_str()) {
                     None
                 } else {
@@ -365,10 +466,38 @@ impl Dashboard {
                 };
                 action = Some(DayAction::SetHighlight(next));
             }
+            if let Some((from, to)) = response.picked {
+                let (start, end) = (ms_at(from), ms_at(to));
+                action = Some(DayAction::Zoom(zoom_for(
+                    fit(start, end - start, vm.day),
+                    vm,
+                    preset,
+                )));
+            }
+            if let Some((pointer, factor)) = response.zoom {
+                let zoomed = zoom_window(target, vm.day, ms_at(pointer), pointer, factor);
+                action = Some(DayAction::Zoom(zoom_for(zoomed, vm, preset)));
+            }
+            if let Some(by) = response.pan {
+                let by = ((shown.1 - shown.0) as f64 * f64::from(by)).round() as i64;
+                action = Some(DayAction::Zoom(zoom_for(
+                    pan_window(target, vm.day, by),
+                    vm,
+                    preset,
+                )));
+            }
+            // A double-click resets the zoom alongside the clicks it is made of, which toggle
+            // a highlight on and off again; Escape resets it unless it is cancelling a drag.
+            let escape =
+                !response.dragging && ui.input(|input| input.key_pressed(egui::Key::Escape));
+            if response.reset || escape {
+                reset = true;
+            }
             if clear_highlight {
                 action = Some(DayAction::SetHighlight(None));
             }
-            // The legend is the summary: each top app with its focused time in the day.
+            // The legend is the summary: each top app with its focused time in the day. Hover
+            // an app to preview its highlight; click to keep it.
             let mut top: Vec<(usize, &DayApp)> = vm
                 .apps
                 .iter()
@@ -376,14 +505,42 @@ impl Dashboard {
                 .collect();
             top.sort_by_key(|(index, _)| *index);
             let other_ms = other_focus_ms(&vm.apps, palette);
+            let mut hovered_app = None;
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing.x = 16.0;
                 for (index, app) in &top {
-                    widgets::legend_item(
+                    let on = highlight == Some(app.key.as_str());
+                    let color = Tokens::APP_PALETTE[*index];
+                    let faded = shown_highlight.is_some_and(|key| key != app.key);
+                    let item = widgets::legend_item(
                         ui,
-                        Some(Tokens::APP_PALETTE[*index]),
+                        Some(if faded {
+                            color.gamma_multiply(0.3)
+                        } else {
+                            color
+                        }),
                         &format!("{} {}", app.name, format::duration(app.focused_ms)),
                     );
+                    let item = ui.interact(
+                        item.rect,
+                        ui.id().with(("legend", &app.key)),
+                        Sense::click(),
+                    );
+                    item.widget_info(|| {
+                        let verb = if on { "Stop highlighting" } else { "Highlight" };
+                        WidgetInfo::labeled(
+                            WidgetType::Button,
+                            ui.is_enabled(),
+                            format!("{verb} {}", app.name),
+                        )
+                    });
+                    widgets::focus_ring(ui, &item, 3);
+                    if item.hovered() {
+                        hovered_app = Some(app.key.clone());
+                    }
+                    if item.clicked() {
+                        action = Some(DayAction::SetHighlight((!on).then(|| app.key.clone())));
+                    }
                 }
                 if other_ms > 0 {
                     widgets::legend_item(
@@ -396,7 +553,19 @@ impl Dashboard {
                     widgets::legend_item(ui, None, "Not recording");
                 }
             });
+            ui.data_mut(|data| match hovered_app {
+                Some(key) => {
+                    data.insert_temp(preview_id, key);
+                }
+                None => data.remove::<String>(preview_id),
+            });
         });
+        if reset && self.dialog.is_none() && self.popup.is_none() {
+            self.nav.view.reset_zoom();
+        }
+        if let Some(previous) = restore_highlight {
+            self.nav.view.lane_app = previous;
+        }
         action
     }
 }
@@ -416,7 +585,25 @@ fn example_app_names() -> HashMap<&'static str, &'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dashboard::nav::ClockTime;
     use chrono::Days;
+
+    /// A day with nothing recorded in `zone`, for checking windows and ticks.
+    fn day_in(date: NaiveDate, zone: chrono_tz::Tz) -> DayVm {
+        DayVm {
+            day: (
+                format::day_start(date, zone),
+                format::day_start(date + Days::new(1), zone),
+            ),
+            date,
+            zone,
+            focused_ms: 0,
+            unknown_ms: 0,
+            gaps_ms: 0,
+            foreground: Vec::new(),
+            apps: Vec::new(),
+        }
+    }
 
     fn labels(ticks: Vec<(f32, String)>) -> Vec<String> {
         ticks.into_iter().map(|(_, label)| label).collect()
@@ -426,6 +613,10 @@ mod tests {
     fn active_day(day: (i64, i64), spans: &[(i64, i64)]) -> DayVm {
         DayVm {
             day,
+            date: chrono::DateTime::from_timestamp_millis(day.0)
+                .unwrap()
+                .date_naive(),
+            zone: chrono_tz::UTC,
             focused_ms: 0,
             unknown_ms: 0,
             gaps_ms: 0,
@@ -460,7 +651,7 @@ mod tests {
         let range = window(&short, DayZoom::Active);
         assert_eq!(range, (day.0 + 17 * HOUR + 45 * MINUTE, day.0 + 18 * HOUR));
         assert_eq!(
-            labels(ticks(range, day.0)),
+            labels(ticks(range, &short)),
             ["17:45", "17:50", "17:55", "18:00"],
             "5 minute ticks"
         );
@@ -480,12 +671,12 @@ mod tests {
         let range = window(&spread, DayZoom::Active);
         assert_eq!(range, (day.0 + 9 * HOUR, day.0 + 15 * HOUR + 15 * MINUTE));
         assert_eq!(
-            labels(ticks(range, day.0)),
+            labels(ticks(range, &spread)),
             ["09", "10", "11", "12", "13", "14", "15"]
         );
         assert_eq!(window(&active_day(day, &[]), DayZoom::Active), day);
         assert_eq!(
-            labels(ticks(day, day.0)),
+            labels(ticks(day, &active_day(day, &[]))),
             ["00", "03", "06", "09", "12", "15", "18", "21", "24"],
             "a full day keeps hour labels, every 3 hours"
         );
@@ -505,7 +696,7 @@ mod tests {
             )
         );
         assert_eq!(
-            labels(ticks(range, day.0)),
+            labels(ticks(range, &session)),
             [
                 "02:10", "02:15", "02:20", "02:25", "02:30", "02:35", "02:40"
             ]
@@ -553,6 +744,235 @@ mod tests {
     fn merged(blocks: &[BlockVm], lane_px: f32) -> Vec<LaneItem<'_>> {
         let refs: Vec<&BlockVm> = blocks.iter().collect();
         merge_slivers(&refs, WINDOW, lane_px, SLIVER_PX)
+    }
+
+    #[test]
+    fn zooming_keeps_the_pointed_time_in_place_and_stays_inside_the_day() {
+        let day = test_day();
+        let window = (day.0 + 10 * HOUR, day.0 + 14 * HOUR);
+        let noon = day.0 + 12 * HOUR;
+        assert_eq!(
+            zoom_window(window, day, noon, 0.5, 2.0),
+            (day.0 + 11 * HOUR, day.0 + 13 * HOUR),
+            "twice as close around noon in the middle"
+        );
+        assert_eq!(
+            zoom_window(window, day, noon, 0.25, 2.0),
+            (
+                day.0 + 11 * HOUR + 30 * MINUTE,
+                day.0 + 13 * HOUR + 30 * MINUTE
+            ),
+            "noon stays a quarter of the way across"
+        );
+        let close = zoom_window(window, day, noon, 0.5, 1_000.0);
+        assert_eq!(
+            close.1 - close.0,
+            MIN_ZOOM,
+            "never narrower than the minimum"
+        );
+        assert_eq!(
+            zoom_window(window, day, noon, 0.5, 0.1),
+            day,
+            "zooming out stops at the whole day"
+        );
+        assert_eq!(
+            zoom_for(day, &active_day(day, &[]), DayZoom::FullDay),
+            DayZoom::FullDay,
+            "zooming out to the whole day from 24 hours is just 24 hours"
+        );
+        assert!(
+            matches!(
+                zoom_for(day, &active_day(day, &[]), DayZoom::Evening),
+                DayZoom::Custom { .. }
+            ),
+            "from Evening it stays a custom zoom, so a reset goes back to Evening"
+        );
+    }
+
+    #[test]
+    fn a_picked_zoom_keeps_its_clock_times_across_a_daylight_saving_change() {
+        let zone: chrono_tz::Tz = chrono_tz::Europe::Berlin;
+        let day_of = |date: NaiveDate| DayVm {
+            day: (
+                format::day_start(date, zone),
+                format::day_start(date + Days::new(1), zone),
+            ),
+            date,
+            zone,
+            focused_ms: 0,
+            unknown_ms: 0,
+            gaps_ms: 0,
+            foreground: Vec::new(),
+            apps: Vec::new(),
+        };
+        let clock = |instant| format::local(instant, zone, "%H:%M");
+        // Clocks in Berlin spring forward from 02:00 to 03:00 on Sunday, March 29, 2026.
+        let saturday = NaiveDate::from_ymd_opt(2026, 3, 28).unwrap();
+        let sunday = NaiveDate::from_ymd_opt(2026, 3, 29).unwrap();
+        let (before, change) = (day_of(saturday), day_of(sunday));
+        let picked = (
+            format::clock_instant(saturday, 9 * HOUR, false, zone),
+            format::clock_instant(saturday, 10 * HOUR, false, zone),
+        );
+        let zoom = zoom_for(picked, &before, DayZoom::Active);
+        assert_eq!(
+            zoom,
+            DayZoom::Custom {
+                from: ClockTime::at(9 * HOUR),
+                to: ClockTime::at(10 * HOUR),
+                length: HOUR,
+            }
+        );
+        let (start, end) = window(&change, zoom);
+        assert_eq!(
+            (clock(start), clock(end)),
+            ("09:00".to_owned(), "10:00".to_owned()),
+            "the same clock hours on the shorter day"
+        );
+        assert_eq!(labels(ticks((start, end), &change))[0], "09:00");
+        let full = ticks(change.day, &change);
+        assert_eq!(
+            labels(full.clone()),
+            ["00", "03", "06", "09", "12", "15", "18", "21", "24"],
+            "ticks keep true clock labels on a 23-hour day"
+        );
+        assert!(
+            (full[1].0 - 2.0 / 23.0).abs() < 1e-4,
+            "03:00 comes two hours after midnight: {}",
+            full[1].0
+        );
+        assert_eq!(clock(window(&change, DayZoom::Evening).0), "17:00");
+    }
+
+    #[test]
+    fn a_zoom_into_the_repeated_hour_stays_in_the_occurrence_it_was_picked_in() {
+        let zone = chrono_tz::Europe::Berlin;
+        // Clocks in Berlin fall back from 03:00 to 02:00 on Sunday, October 25, 2026.
+        let date = NaiveDate::from_ymd_opt(2026, 10, 25).unwrap();
+        let vm = day_in(date, zone);
+        let second = |ms| format::clock_instants(date, ms, zone)[1];
+        let picked = (
+            second(2 * HOUR + 15 * MINUTE),
+            second(2 * HOUR + 45 * MINUTE),
+        );
+        let zoom = zoom_for(picked, &vm, DayZoom::Active);
+        assert!(
+            matches!(
+                zoom,
+                DayZoom::Custom {
+                    from: ClockTime { repeat: true, .. },
+                    to: ClockTime { repeat: true, .. },
+                    ..
+                }
+            ),
+            "{zoom:?}"
+        );
+        assert_eq!(
+            window(&vm, zoom),
+            picked,
+            "the second 02:15 to 02:45, not the hour before"
+        );
+        assert_eq!(
+            labels(ticks(picked, &vm)),
+            [
+                "02:15", "02:20", "02:25", "02:30", "02:35", "02:40", "02:45"
+            ],
+            "the repeated hour still has its ticks"
+        );
+    }
+
+    #[test]
+    fn a_span_across_the_autumn_change_keeps_its_length_on_the_next_day() {
+        let zone = chrono_tz::Europe::Berlin;
+        // Clocks in Berlin fall back from 03:00 to 02:00 on Sunday, October 25, 2026.
+        let date = NaiveDate::from_ymd_opt(2026, 10, 25).unwrap();
+        let instants = |ms| format::clock_instants(date, ms, zone);
+        // From the first 02:45 to the second 02:15: half an hour.
+        let picked = (
+            instants(2 * HOUR + 45 * MINUTE)[0],
+            instants(2 * HOUR + 15 * MINUTE)[1],
+        );
+        assert_eq!(picked.1 - picked.0, 30 * MINUTE);
+        let zoom = zoom_for(picked, &day_in(date, zone), DayZoom::Active);
+        let next = date + Days::new(1);
+        let (start, end) = window(&day_in(next, zone), zoom);
+        assert_eq!(
+            end - start,
+            30 * MINUTE,
+            "reversed clock endpoints fall back to the picked length"
+        );
+        assert_eq!(format::local(start, zone, "%H:%M"), "02:45");
+    }
+
+    #[test]
+    fn a_skipped_hour_gets_no_tick_and_the_real_one_keeps_its_label() {
+        let zone = chrono_tz::Europe::Berlin;
+        // Clocks in Berlin spring forward from 02:00 to 03:00 on Sunday, March 29, 2026.
+        let date = NaiveDate::from_ymd_opt(2026, 3, 29).unwrap();
+        let vm = day_in(date, zone);
+        let at = |ms| format::clock_instant(date, ms, false, zone);
+        let window = (at(HOUR + 30 * MINUTE), at(3 * HOUR + 30 * MINUTE));
+        let ticks = ticks(window, &vm);
+        assert_eq!(
+            labels(ticks.clone()),
+            [
+                "01:30", "01:40", "01:50", "03:00", "03:10", "03:20", "03:30"
+            ],
+            "02:00 to 02:50 never happen that day"
+        );
+        let three = ticks.iter().find(|(_, label)| label == "03:00").unwrap();
+        assert!(
+            (three.0 - 0.5).abs() < 1e-4,
+            "03:00 is half an hour after 01:30: {}",
+            three.0
+        );
+    }
+
+    #[test]
+    fn panning_stops_at_the_edges_of_the_day() {
+        let day = test_day();
+        let window = (day.0 + HOUR, day.0 + 3 * HOUR);
+        assert_eq!(
+            pan_window(window, day, 30 * MINUTE),
+            (day.0 + HOUR + 30 * MINUTE, day.0 + 3 * HOUR + 30 * MINUTE)
+        );
+        assert_eq!(
+            pan_window(window, day, -5 * HOUR),
+            (day.0, day.0 + 2 * HOUR)
+        );
+        assert_eq!(
+            pan_window(window, day, 30 * HOUR),
+            (day.1 - 2 * HOUR, day.1)
+        );
+    }
+
+    #[test]
+    fn a_picked_zoom_keeps_its_hours_on_another_day() {
+        let day = test_day();
+        let zoom = zoom_for(
+            (day.0 + 9 * HOUR, day.0 + 10 * HOUR),
+            &active_day(day, &[]),
+            DayZoom::Active,
+        );
+        assert_eq!(
+            window(&active_day(day, &[]), zoom),
+            (day.0 + 9 * HOUR, day.0 + 10 * HOUR)
+        );
+        let next = (day.1, day.1 + 24 * HOUR);
+        assert_eq!(
+            window(&active_day(next, &[]), zoom),
+            (next.0 + 9 * HOUR, next.0 + 10 * HOUR)
+        );
+        assert_eq!(
+            fit(day.0 + 9 * HOUR, MINUTE, day),
+            (day.0 + 9 * HOUR, day.0 + 9 * HOUR + MIN_ZOOM),
+            "a tiny pick widens to the minimum"
+        );
+        assert_eq!(
+            fit(day.1 - MINUTE, HOUR, day),
+            (day.1 - HOUR, day.1),
+            "a pick at midnight stays in the day"
+        );
     }
 
     #[test]
@@ -732,6 +1152,8 @@ mod tests {
     fn a_highlight_needs_focus_that_day() {
         let vm = DayVm {
             day: (0, 1),
+            date: NaiveDate::from_ymd_opt(1970, 1, 1).unwrap(),
+            zone: chrono_tz::UTC,
             focused_ms: 0,
             unknown_ms: 0,
             gaps_ms: 0,

@@ -148,6 +148,42 @@ impl Dashboard {
         }
     }
 
+    /// Fades what a page draws next while it is still the previous range's or day's. A quick
+    /// load swaps the content before anything changes, so there is no flash; a slow one fades
+    /// the old numbers back so they don't pass for the new ones. Call it every frame with
+    /// whether the content is stale; `id` tells the page's faded areas apart.
+    pub(super) fn dim_while_stale(ui: &mut Ui, id: &str, stale: bool) {
+        const WAIT: f64 = 0.15;
+        const FADE: f64 = 0.2;
+        const STALE_OPACITY: f32 = 0.45;
+        if !stale {
+            return;
+        }
+        let ctx = ui.ctx().clone();
+        let key = egui::Id::new(("stale-since", id));
+        let now = ctx.input(|input| input.time);
+        let frame = ctx.cumulative_frame_nr();
+        let since = ctx
+            .data(|data| data.get_temp::<(f64, u64)>(key))
+            .filter(|(_, seen)| seen + 1 >= frame)
+            .map_or(now, |(since, _)| since);
+        ctx.data_mut(|data| data.insert_temp(key, (since, frame)));
+        let waited = now - since;
+        if waited < WAIT {
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(WAIT - waited));
+            return;
+        }
+        let faded = if widgets::motion::enabled(&ctx) {
+            ((waited - WAIT) / FADE).min(1.0) as f32
+        } else {
+            1.0
+        };
+        if faded < 1.0 {
+            ctx.request_repaint();
+        }
+        ui.multiply_opacity(widgets::motion::lerp(1.0, STALE_OPACITY, faded));
+    }
+
     /// Loading and error states shared by report-backed pages.
     pub(super) fn report_status(&self, ui: &mut Ui) {
         let key = (self.nav.view.range, self.nav.view.exclude_idle);
@@ -159,7 +195,7 @@ impl Dashboard {
                 error,
                 &[],
             );
-        } else if self.report.loading(&key) && self.report.get(&key).is_none() {
+        } else if self.report.loading(&key) && self.report.shown(&key).is_none() {
             ui.add_space(24.0);
             ui.vertical_centered(|ui| ui.spinner());
         }
@@ -1119,19 +1155,427 @@ mod render_tests {
         );
     }
 
-    /// An idle, unfocused window schedules no repaint: nothing animates or polls the UI
-    /// continuously (the worker wakes it only when results arrive).
+    fn drag(ctx: &Context, dashboard: &mut Dashboard, from: egui::Pos2, to: egui::Pos2) {
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        pointer_frame(ctx, dashboard, vec![egui::Event::PointerMoved(from)]);
+        pointer_frame(ctx, dashboard, vec![button(from, true)]);
+        // A real mouse moves a few pixels each frame.
+        let steps = ((to - from).length() / 4.0).ceil().max(1.0) as usize;
+        for step in 1..=steps {
+            let at = from.lerp(to, step as f32 / steps as f32);
+            pointer_frame(ctx, dashboard, vec![egui::Event::PointerMoved(at)]);
+        }
+    }
+
+    fn release(ctx: &Context, dashboard: &mut Dashboard, at: egui::Pos2) -> FullOutput {
+        pointer_frame(
+            ctx,
+            dashboard,
+            vec![egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        )
+    }
+
+    /// The last move and the release in one frame, as a real mouse often sends them.
+    fn release_after_move(ctx: &Context, dashboard: &mut Dashboard, at: egui::Pos2) {
+        pointer_frame(
+            ctx,
+            dashboard,
+            vec![
+                egui::Event::PointerMoved(at),
+                egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+    }
+
+    fn escape() -> Vec<egui::Event> {
+        vec![egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }]
+    }
+
+    #[test]
+    fn dragging_across_days_totals_them_until_escape() {
+        let ctx = Context::default();
+        let mut dashboard = Dashboard::for_test(&ctx);
+        dashboard.recorder = Some(status(true));
+        // A past week, so every day has recorded time.
+        let today = dashboard.today();
+        let week_start = dashboard.prefs.week_start;
+        let past = crate::dashboard::nav::period_range(
+            crate::dashboard::nav::Period::Week,
+            today - chrono::Days::new(7),
+            week_start,
+        );
+        dashboard
+            .nav
+            .set_range(crate::dashboard::nav::Period::Week, past);
+        let key = (dashboard.nav.view.range, dashboard.nav.view.exclude_idle);
+        let report = report(&dashboard);
+        dashboard.report.finish(key, Ok(Arc::new(report)));
+        let output = frame(&ctx, &mut dashboard, [1100.0, 1600.0]);
+        let day_label = |offset: u64| {
+            (past.start + chrono::Days::new(offset))
+                .format("%a %-d")
+                .to_string()
+        };
+        let first = text_rects(&output, &day_label(0))[0];
+        let third = text_rects(&output, &day_label(2))[0];
+        let at = |label: Rect| pos2(label.center().x, label.top() - 40.0);
+        let summary = "3 days · 1h 30m · 30m avg";
+        drag(&ctx, &mut dashboard, at(first), at(third));
+        let output = pointer_frame(&ctx, &mut dashboard, vec![]);
+        assert!(
+            has(&output, summary),
+            "while dragging: {:?}",
+            texts(&output)
+        );
+        release(&ctx, &mut dashboard, at(third));
+        let output = pointer_frame(&ctx, &mut dashboard, vec![]);
+        assert!(has(&output, summary), "kept after the release");
+        assert_eq!(
+            dashboard.nav.page(),
+            &Page::Overview,
+            "a drag opens no timeline"
+        );
+        pointer_frame(
+            &ctx,
+            &mut dashboard,
+            vec![egui::Event::Key {
+                key: egui::Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        let output = pointer_frame(&ctx, &mut dashboard, vec![]);
+        assert!(!has(&output, summary), "Escape clears the pick");
+
+        let second = text_rects(&output, &day_label(1))[0];
+        drag(&ctx, &mut dashboard, at(first), at(second));
+        release_after_move(&ctx, &mut dashboard, at(third));
+        let output = pointer_frame(&ctx, &mut dashboard, vec![]);
+        assert!(
+            has(&output, summary),
+            "a release that arrives with the last move ends on that day: {:?}",
+            texts(&output)
+        );
+    }
+
+    #[test]
+    fn the_lane_zooms_to_a_dragged_span_and_the_wheel_and_resets_follow() {
+        use crate::dashboard::nav::DayZoom;
+        use tempora::storage::{TimelineEntry, TimelineKind};
+        let ctx = Context::default();
+        let mut dashboard = Dashboard::for_test(&ctx);
+        dashboard.recorder = Some(status(true));
+        let date = dashboard.nav.view.range.start;
+        let midnight = crate::dashboard::format::day_start(date, dashboard.zone);
+        let base = midnight + 20 * HOUR;
+        let mut report = report(&dashboard);
+        report.timeline = vec![
+            TimelineEntry {
+                start_ms: base,
+                end_ms: base + HOUR,
+                kind: TimelineKind::Focus("steam:1086940".into()),
+            },
+            TimelineEntry {
+                start_ms: base + HOUR,
+                end_ms: base + 2 * HOUR,
+                kind: TimelineKind::Paused,
+            },
+        ];
+        dashboard
+            .day_report
+            .finish((date, false), Ok(Arc::new(report)));
+        dashboard.nav.drill(Page::Day(date));
+        // Active hours run 20:00 to 22:00, labelled at each quarter hour.
+        let output = frame(&ctx, &mut dashboard, [1100.0, 1600.0]);
+        let topmost = |label: &str| {
+            text_rects(&output, label)
+                .into_iter()
+                .min_by(|a, b| a.top().total_cmp(&b.top()))
+                .unwrap_or_else(|| panic!("{label} tick: {:?}", texts(&output)))
+        };
+        let (start, end) = (topmost("20:00"), topmost("22:00"));
+        // The lane sits under the axis row: half the row, the card's gap, half the lane.
+        let y = start.center().y + 8.0 + 14.0 + 22.0;
+        let x = |share: f32| start.left() + (end.right() - start.left()) * share;
+        let span = |dashboard: &Dashboard| match dashboard.nav.view.zoom {
+            DayZoom::Custom { from, to, .. } => (from.ms, to.ms),
+            other => panic!("expected a custom zoom, got {other:?}"),
+        };
+        let near = |actual: i64, expected: i64| (actual - expected).abs() <= 2 * 60_000;
+
+        drag(&ctx, &mut dashboard, pos2(x(0.25), y), pos2(x(0.75), y));
+        pointer_frame(&ctx, &mut dashboard, escape());
+        release(&ctx, &mut dashboard, pos2(x(0.75), y));
+        assert_eq!(
+            dashboard.nav.view.zoom,
+            DayZoom::Active,
+            "Escape cancels the drag instead of zooming"
+        );
+
+        drag(&ctx, &mut dashboard, pos2(x(0.25), y), pos2(x(0.6), y));
+        release_after_move(&ctx, &mut dashboard, pos2(x(0.75), y));
+        let (from, to) = span(&dashboard);
+        assert!(
+            near(from, 20 * HOUR + 30 * 60_000) && near(to, 21 * HOUR + HOUR / 2),
+            "picked 20:30 to 21:30: {from} {to}"
+        );
+
+        let zoomed = dashboard.nav.view.zoom;
+        drag(&ctx, &mut dashboard, pos2(x(0.4), y), pos2(x(0.6), y));
+        pointer_frame(&ctx, &mut dashboard, escape());
+        release(&ctx, &mut dashboard, pos2(x(0.6), y));
+        assert_eq!(
+            dashboard.nav.view.zoom, zoomed,
+            "Escape cancels a second drag and keeps the zoom it started from"
+        );
+
+        pointer_frame(
+            &ctx,
+            &mut dashboard,
+            vec![
+                egui::Event::PointerMoved(pos2(x(0.5), y)),
+                egui::Event::Zoom(2.0),
+            ],
+        );
+        let (from, to) = span(&dashboard);
+        assert!(
+            near(to - from, HOUR / 2),
+            "Ctrl+wheel halves the span: {from} {to}"
+        );
+        assert!(
+            near(from, 20 * HOUR + 45 * 60_000),
+            "around the pointer: {from}"
+        );
+
+        let output = frame(&ctx, &mut dashboard, [1100.0, 1600.0]);
+        assert!(has(&output, "Reset zoom"), "zoomed: {:?}", texts(&output));
+
+        let key = |key| {
+            vec![egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }]
+        };
+        pointer_frame(&ctx, &mut dashboard, key(egui::Key::Escape));
+        assert_eq!(
+            dashboard.nav.view.zoom,
+            DayZoom::Active,
+            "Escape goes back to the preset"
+        );
+
+        drag(&ctx, &mut dashboard, pos2(x(0.25), y), pos2(x(0.75), y));
+        release(&ctx, &mut dashboard, pos2(x(0.75), y));
+        span(&dashboard);
+        // Firefox is highlighted; the double-click lands on the game's block.
+        let firefox = Some(r"exe:c:\firefox.exe".to_owned());
+        dashboard.nav.view.lane_app = firefox.clone();
+        for _ in 0..2 {
+            pointer_click(
+                &ctx,
+                &mut dashboard,
+                pos2(x(0.25), y),
+                egui::PointerButton::Primary,
+            );
+        }
+        assert_eq!(
+            dashboard.nav.view.zoom,
+            DayZoom::Active,
+            "a double-click zooms back out"
+        );
+        assert_eq!(
+            dashboard.nav.view.lane_app, firefox,
+            "and its two clicks leave the highlight as it was"
+        );
+
+        dashboard.nav.view.set_zoom(DayZoom::Evening);
+        frame(&ctx, &mut dashboard, [1100.0, 1600.0]);
+        pointer_frame(
+            &ctx,
+            &mut dashboard,
+            vec![
+                egui::Event::PointerMoved(pos2(x(0.5), y)),
+                egui::Event::Zoom(0.01),
+            ],
+        );
+        assert!(
+            dashboard.nav.view.zoomed(),
+            "zoomed all the way out from Evening: {:?}",
+            dashboard.nav.view.zoom
+        );
+        pointer_frame(&ctx, &mut dashboard, escape());
+        assert_eq!(
+            dashboard.nav.view.zoom,
+            DayZoom::Evening,
+            "a reset still goes back to Evening"
+        );
+    }
+
+    #[test]
+    fn app_detail_labels_old_sessions_with_their_own_range_while_the_next_loads() {
+        use crate::dashboard::nav::Period;
+        let ctx = Context::default();
+        let mut dashboard = Dashboard::for_test(&ctx);
+        dashboard.recorder = Some(status(true));
+        let week = dashboard.nav.view.range;
+        let report = report(&dashboard);
+        dashboard.report.finish((week, false), Ok(Arc::new(report)));
+        dashboard.nav.drill(Page::App("steam:1086940".into()));
+        frame(&ctx, &mut dashboard, [1100.0, 1600.0]);
+        // Step back a week; its report hasn't arrived.
+        let previous = crate::dashboard::nav::period_range(
+            Period::Week,
+            week.start - chrono::Days::new(7),
+            dashboard.prefs.week_start,
+        );
+        dashboard.nav.set_range(Period::Week, previous);
+        let output = frame(&ctx, &mut dashboard, [1100.0, 1600.0]);
+        let old = crate::dashboard::format::range_label(week, Period::Custom);
+        let new = crate::dashboard::format::range_label(previous, Period::Week);
+        assert!(
+            has(&output, &format!("in {old}")),
+            "the old sessions keep their week: {:?}",
+            texts(&output)
+        );
+        assert!(
+            !has(&output, &format!("in {new}")),
+            "and aren't labelled with the new one: {:?}",
+            texts(&output)
+        );
+    }
+
+    #[test]
+    fn a_day_still_loading_shows_the_previous_day_as_itself_then_fades_it() {
+        use tempora::storage::{TimelineEntry, TimelineKind};
+        let ctx = Context::default();
+        let mut dashboard = Dashboard::for_test(&ctx);
+        dashboard.recorder = Some(status(true));
+        let date = dashboard.nav.view.range.start;
+        let base = crate::dashboard::format::day_start(date, dashboard.zone) + 20 * HOUR;
+        let mut report = report(&dashboard);
+        report.timeline = vec![TimelineEntry {
+            start_ms: base,
+            end_ms: base + HOUR,
+            kind: TimelineKind::Focus("steam:1086940".into()),
+        }];
+        dashboard
+            .day_report
+            .finish((date, false), Ok(Arc::new(report)));
+        dashboard.nav.drill(Page::Day(date));
+        frame(&ctx, &mut dashboard, [1100.0, 1600.0]);
+        // The next day hasn't loaded yet.
+        let next = date + chrono::Days::new(1);
+        dashboard.nav.view.page = Page::Day(next);
+        let draw = |dashboard: &mut Dashboard, second: f64| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1100.0, 1600.0))),
+                    time: Some(second),
+                    ..egui::RawInput::default()
+                },
+                |ui| dashboard.draw_shell(ui),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        // egui fades text by scaling its glyph colors, so this reads their alpha.
+        fn alphas(output: &FullOutput, label: &str) -> Vec<u8> {
+            fn walk(shape: &Shape, label: &str, out: &mut Vec<u8>) {
+                match shape {
+                    Shape::Text(text) if text.galley.text() == label => {
+                        let alpha = text
+                            .galley
+                            .rows
+                            .iter()
+                            .flat_map(|row| row.row.visuals.mesh.vertices.iter())
+                            .map(|vertex| vertex.color.a())
+                            .max()
+                            .unwrap_or(0);
+                        out.push(alpha);
+                    }
+                    Shape::Vec(shapes) => shapes.iter().for_each(|shape| walk(shape, label, out)),
+                    _ => {}
+                }
+            }
+            let mut out = Vec::new();
+            for clipped in &output.shapes {
+                walk(&clipped.shape, label, &mut out);
+            }
+            out
+        }
+        let output = draw(&mut dashboard, 10.0);
+        assert!(
+            has(&output, &next.format("%A, %b %-d").to_string()),
+            "the new day's title is up"
+        );
+        assert!(
+            !has(&output, "Nothing recorded this day"),
+            "the previous day is drawn as itself, not clipped to the new one: {:?}",
+            texts(&output)
+        );
+        let focused = alphas(&output, "focused");
+        assert!(
+            !focused.is_empty() && focused.iter().all(|alpha| *alpha == 255),
+            "a quick load swaps without fading: {focused:?}"
+        );
+        let output = draw(&mut dashboard, 11.0);
+        let focused = alphas(&output, "focused");
+        assert!(
+            !focused.is_empty() && focused.iter().all(|alpha| *alpha < 200),
+            "a slow load fades the old totals back: {focused:?}"
+        );
+    }
+
+    /// An idle, unfocused window schedules no repaint: with motion on, the entrances settle
+    /// and nothing animates or polls the UI continuously (the worker wakes it only when
+    /// results arrive).
     #[test]
     fn idle_pages_do_not_request_continuous_repaints() {
-        for page in [Page::Overview, Page::Library, Page::Settings] {
+        for page in 0..4 {
             let ctx = Context::default();
             let mut dashboard = Dashboard::for_test(&ctx);
+            crate::dashboard::widgets::motion::set_enabled(&ctx, true);
             dashboard.recorder = Some(status(true));
             let key = (dashboard.nav.view.range, dashboard.nav.view.exclude_idle);
             let report = Arc::new(report(&dashboard));
-            dashboard.report.finish(key, Ok(report));
+            let date = dashboard.nav.view.range.start;
+            dashboard.report.finish(key, Ok(report.clone()));
+            dashboard.day_report.finish((date, false), Ok(report));
+            let page = [
+                Page::Overview,
+                Page::Library,
+                Page::Settings,
+                Page::Day(date),
+            ][page]
+                .clone();
             dashboard.nav.section(page.clone());
-            // A clock that advances lets one-off animations (scroll bar fade-in) finish.
+            // A clock that advances lets one-off animations (entrances, scroll bar fade-in)
+            // finish.
             let input = |second: f64| egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1100.0, 720.0))),
                 focused: false,

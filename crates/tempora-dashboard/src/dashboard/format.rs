@@ -44,6 +44,54 @@ pub(super) fn day_start(date: NaiveDate, zone: Tz) -> i64 {
     local.and_utc().timestamp_millis()
 }
 
+/// The instants at which the clock in `zone` reads `clock_ms` after midnight on `date`, in
+/// order: none for a time skipped when clocks spring forward, two for a time repeated when
+/// they fall back, else one. 24:00 is the next midnight.
+pub(super) fn clock_instants(date: NaiveDate, clock_ms: i64, zone: Tz) -> Vec<i64> {
+    const DAY_MS: i64 = 24 * 3_600_000;
+    if clock_ms >= DAY_MS {
+        return vec![day_start(date + chrono::Days::new(1), zone)];
+    }
+    let local = date.and_hms_opt(0, 0, 0).expect("midnight exists")
+        + chrono::TimeDelta::milliseconds(clock_ms.max(0));
+    match zone.from_local_datetime(&local) {
+        LocalResult::Single(time) => vec![time.timestamp_millis()],
+        LocalResult::Ambiguous(first, second) => {
+            let (first, second) = (first.timestamp_millis(), second.timestamp_millis());
+            vec![first.min(second), first.max(second)]
+        }
+        LocalResult::None => Vec::new(),
+    }
+}
+
+/// The instant the clock in `zone` reads `clock_ms` after midnight on `date`. For a repeated
+/// time, `repeat` picks the second occurrence. A skipped time maps to where the clock resumes.
+pub(super) fn clock_instant(date: NaiveDate, clock_ms: i64, repeat: bool, zone: Tz) -> i64 {
+    // Clock changes skip at most a few hours, so a gap ends within this many minutes.
+    for minutes in 0..240 {
+        let instants = clock_instants(date, clock_ms + minutes * 60_000, zone);
+        let pick = if repeat {
+            instants.last()
+        } else {
+            instants.first()
+        };
+        if let Some(instant) = pick {
+            return *instant;
+        }
+    }
+    day_start(date, zone) + clock_ms
+}
+
+/// What the clock in `zone` reads at `instant`, in milliseconds after midnight.
+pub(super) fn clock_ms(instant: i64, zone: Tz) -> i64 {
+    use chrono::Timelike;
+    DateTime::<Utc>::from_timestamp_millis(instant).map_or(0, |time| {
+        let time = time.with_timezone(&zone).time();
+        i64::from(time.num_seconds_from_midnight()) * 1_000
+            + i64::from(time.nanosecond() / 1_000_000)
+    })
+}
+
 pub(super) fn percent(part: i64, whole: i64) -> Option<u32> {
     (whole > 0).then(|| ((part.max(0) as f64 / whole as f64) * 100.0).round() as u32)
 }
