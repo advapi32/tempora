@@ -125,7 +125,7 @@ impl Samples {
             );
         });
         self.feedback(ui);
-        widgets::toast_body(ui, "App updated", false, true);
+        widgets::toast_body(ui, "App updated", false, Some("Undo"));
         self.open_surfaces(ui);
         examples_table(ui);
         chart_examples(ui, self.period != 1);
@@ -649,10 +649,12 @@ fn chart_examples(ui: &mut Ui, week: bool) {
                         color: colors.category(*category),
                         ms: i64::from(*minutes) * 60_000,
                         dimmed: false,
+                        name: category.label(),
                     })
                     .collect(),
                 today: false,
                 future: false,
+                slice_detail: None,
             }
         })
         .collect();

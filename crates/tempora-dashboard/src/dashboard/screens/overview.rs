@@ -586,10 +586,12 @@ fn day_chart(ui: &mut Ui, vm: &OverviewVm, only: Option<Category>, plot: f32) ->
                         color: colors.category(*category),
                         ms: *ms,
                         dimmed: only.is_some_and(|only| only != *category),
+                        name: category.label(),
                     })
                     .collect(),
                 today: day.today,
                 future: day.future,
+                slice_detail: Some(day.date.format("%A, %b %-d").to_string()),
             }
         })
         .collect();

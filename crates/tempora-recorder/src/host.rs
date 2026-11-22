@@ -12,8 +12,8 @@ use std::{
 };
 use tempora::{
     model::{
-        AppIdentity, CAPABILITY_RESET_APP, CAPABILITY_UNGROUP_APP, ControlRequest, ControlResponse,
-        RecorderStatus, Settings, database_path,
+        AppIdentity, CAPABILITY_RESET_APP, CAPABILITY_TRACKED_UNDO, CAPABILITY_UNGROUP_APP,
+        ControlRequest, ControlResponse, RecorderStatus, Settings, database_path,
     },
     observation::{Engine, WindowsObserver, capture_clock},
     pipe::Server,
@@ -73,6 +73,7 @@ fn run_recorder() -> Result<()> {
         pause_start: None,
         candidates: Vec::new(),
         last_candidates: None,
+        undo_tokens: Vec::new(),
         dashboard: None,
         asleep: false,
         ending_session: false,
@@ -156,6 +157,8 @@ struct Host {
     pause_start: Option<(i64, i32)>,
     candidates: Vec<AppIdentity>,
     last_candidates: Option<Instant>,
+    /// Tokens for the contiguous set of tracked corrections at the top of the database stack.
+    undo_tokens: Vec<u64>,
     dashboard: Option<Child>,
     session_eligible: bool,
     asleep: bool,
@@ -264,6 +267,13 @@ impl Host {
         if self.quitting {
             return ControlResponse::Error("The recorder is shutting down".into());
         }
+        let (request, token) = match request {
+            ControlRequest::TrackCorrection { token, command } if command.is_app_correction() => {
+                (*command, Some(token))
+            }
+            request => (request, None),
+        };
+        let is_correction = request.is_app_correction();
         let result = match request {
             ControlRequest::Status => {
                 let now = Instant::now();
@@ -282,7 +292,11 @@ impl Host {
                     candidates: self.candidates.clone(),
                     problem: self.problem().map(str::to_owned),
                     recording: self.recording(),
-                    capabilities: vec![CAPABILITY_RESET_APP.into(), CAPABILITY_UNGROUP_APP.into()],
+                    capabilities: vec![
+                        CAPABILITY_RESET_APP.into(),
+                        CAPABILITY_UNGROUP_APP.into(),
+                        CAPABILITY_TRACKED_UNDO.into(),
+                    ],
                 });
             }
             ControlRequest::SetSettings(settings) => self.change_settings(settings),
@@ -302,23 +316,41 @@ impl Host {
             ControlRequest::GroupApps { source, target } => {
                 self.store.group_apps(&source, &target).map_err(Into::into)
             }
-            ControlRequest::UndoCorrection => match self.store.undo_correction() {
-                Ok(true) => Ok(()),
-                Ok(false) => Err(anyhow::anyhow!("There are no app corrections to undo")),
-                Err(error) => Err(error.into()),
-            },
-            ControlRequest::DeleteHistory { key } => self
-                .store
-                .delete_history(key.as_deref())
-                .map(|_| {
-                    self.fingerprinted.clear();
-                    self.pending_fingerprints.clear();
-                    self.reset_observation();
-                    if self.pause_start.is_some() && key.is_none() {
-                        self.pause_start = Some(capture_clock());
+            ControlRequest::TrackCorrection { .. } => {
+                Err(anyhow::anyhow!("Only an app correction can be tracked"))
+            }
+            ControlRequest::UndoTrackedCorrection { token }
+                if self.undo_tokens.last() != Some(&token) =>
+            {
+                Err(anyhow::anyhow!(
+                    "That change is no longer the latest app change"
+                ))
+            }
+            ControlRequest::UndoCorrection | ControlRequest::UndoTrackedCorrection { .. } => {
+                match self.store.undo_correction() {
+                    Ok(true) => {
+                        self.undo_tokens.pop();
+                        Ok(())
                     }
-                })
-                .map_err(Into::into),
+                    Ok(false) => Err(anyhow::anyhow!("There are no app corrections to undo")),
+                    Err(error) => Err(error.into()),
+                }
+            }
+            ControlRequest::DeleteHistory { key } => {
+                // Deletion can prune snapshots from any point in the correction stack.
+                self.undo_tokens.clear();
+                self.store
+                    .delete_history(key.as_deref())
+                    .map(|_| {
+                        self.fingerprinted.clear();
+                        self.pending_fingerprints.clear();
+                        self.reset_observation();
+                        if self.pause_start.is_some() && key.is_none() {
+                            self.pause_start = Some(capture_clock());
+                        }
+                    })
+                    .map_err(Into::into)
+            }
             ControlRequest::Backup { path } => self.store.backup(&path).map_err(Into::into),
             ControlRequest::ResetApp { key } => self.store.reset_app(&key).map_err(Into::into),
             ControlRequest::UngroupApp { key } => self.store.ungroup_app(&key).map_err(Into::into),
@@ -329,7 +361,15 @@ impl Host {
             }
         };
         match result {
-            Ok(()) => ControlResponse::Ok,
+            Ok(()) => {
+                if is_correction {
+                    match token {
+                        Some(token) => self.undo_tokens.push(token),
+                        None => self.undo_tokens.clear(),
+                    }
+                }
+                ControlResponse::Ok
+            }
             Err(error) => ControlResponse::Error(error.to_string()),
         }
     }

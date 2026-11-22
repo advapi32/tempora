@@ -15,6 +15,10 @@ pub(super) struct Tokens {
     pub border: Color32,
     pub muted: Color32,
     pub hover: Color32,
+    /// Hover fill of an unselected option inside a `muted` group (nav, segmented
+    /// controls), one step past `muted` so it shows against the group. In light mode the
+    /// step stays smaller than the selected chip's, so hover never outweighs the selection.
+    pub group_hover: Color32,
     /// Fill of outlined controls (secondary buttons, inputs). In dark mode a faint white
     /// overlay, so a control reads slightly lighter than the surface it sits on.
     pub control: Color32,
@@ -32,7 +36,10 @@ pub(super) struct Tokens {
     pub gap_hatch: Color32,
     pub scroll_thumb: Color32,
     pub scroll_thumb_hover: Color32,
+    /// Popovers, menus, dialogs and toasts.
     pub shadow: egui::Shadow,
+    /// The selected option of a segmented control or the nav.
+    pub raised: egui::Shadow,
 }
 
 const DARK: Tokens = Tokens {
@@ -42,6 +49,7 @@ const DARK: Tokens = Tokens {
     border: rgb(0x27272a),
     muted: rgb(0x1a1a1d),
     hover: rgb(0x1c1c20),
+    group_hover: rgb(0x2a2a2e),
     control: Color32::from_rgba_premultiplied(12, 12, 12, 12),
     control_hover: Color32::from_rgba_premultiplied(20, 20, 20, 20),
     fg: rgb(0xfafafa),
@@ -57,7 +65,8 @@ const DARK: Tokens = Tokens {
     gap_hatch: rgb(0x45454d),
     scroll_thumb: rgb(0x3f3f46),
     scroll_thumb_hover: rgb(0x52525b),
-    shadow: shadow(128),
+    shadow: shadow([0, 8], 24, 128),
+    raised: shadow([0, 1], 2, 80),
 };
 
 const LIGHT: Tokens = Tokens {
@@ -67,6 +76,7 @@ const LIGHT: Tokens = Tokens {
     border: rgb(0xe4e4e7),
     muted: rgb(0xf4f4f5),
     hover: rgb(0xf4f4f5),
+    group_hover: rgb(0xebebed),
     control: rgb(0xffffff),
     control_hover: rgb(0xf4f4f5),
     fg: rgb(0x09090b),
@@ -82,13 +92,16 @@ const LIGHT: Tokens = Tokens {
     gap_hatch: rgb(0xd4d4d8),
     scroll_thumb: rgb(0xd4d4d8),
     scroll_thumb_hover: rgb(0xa1a1aa),
-    shadow: shadow(31),
+    // Close to shadcn's shadow-md and shadow-sm: soft and short, so light surfaces
+    // keep their edge from the border rather than from a dark halo.
+    shadow: shadow([0, 4], 12, 20),
+    raised: shadow([0, 1], 3, 22),
 };
 
-const fn shadow(alpha: u8) -> egui::Shadow {
+const fn shadow(offset: [i8; 2], blur: u8, alpha: u8) -> egui::Shadow {
     egui::Shadow {
-        offset: [0, 12],
-        blur: 32,
+        offset,
+        blur,
         spread: 0,
         color: Color32::from_black_alpha(alpha),
     }
@@ -235,9 +248,12 @@ pub(super) fn setup(ctx: &Context) {
             include_bytes!("fonts/GeistMono-SemiBold.ttf").as_slice(),
         ),
     ] {
-        fonts
-            .font_data
-            .insert(name.into(), FontData::from_static(bytes).into());
+        let mut data = FontData::from_static(bytes);
+        if fallback == FontFamily::Proportional {
+            // Quarter-pixel glyph positions keep small proportional text evenly spaced.
+            data.tweak.subpixel_binning = Some(true);
+        }
+        fonts.font_data.insert(name.into(), data.into());
         let fallbacks = fonts.families[&fallback].iter().cloned();
         let family_fonts = std::iter::once(name.into()).chain(fallbacks).collect();
         fonts.families.insert(family, family_fonts);
@@ -286,8 +302,8 @@ pub(super) fn setup(ctx: &Context) {
 
 fn visuals(theme: egui::Theme, colors: &Tokens) -> egui::Visuals {
     let mut visuals = theme.default_visuals();
-    // Hinted glyphs on whole pixels. Sub-pixel binning evens out kerning but blurs stems,
-    // so it stays off. The transfer curves are egui's per-theme defaults.
+    // Hint all glyphs. Proportional Geist opts into fractional positioning per face,
+    // while the monospace, icon and fallback faces use whole pixels.
     visuals.text_options.font_hinting = true;
     visuals.text_options.subpixel_binning = false;
     visuals.text_options.color_transfer_function = match theme {

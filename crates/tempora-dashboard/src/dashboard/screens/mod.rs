@@ -587,16 +587,79 @@ mod render_tests {
     }
 
     #[test]
-    fn grouped_app_lists_its_sources_with_remove_from_group() {
+    fn month_chart_shows_the_daily_total_in_each_slice_tooltip() {
+        use crate::dashboard::widgets::{self, Segment, StackedBar};
+
+        let ctx = Context::default();
+        let _dashboard = Dashboard::for_test(&ctx);
+        let bars: Vec<_> = (0..30)
+            .map(|index| StackedBar {
+                label: format!("day-{index}"),
+                description: "2h 07m focused. Open timeline.".into(),
+                total: Some("2h 07m".into()),
+                segments: vec![
+                    Segment {
+                        color: egui::Color32::RED,
+                        ms: 2 * HOUR,
+                        dimmed: false,
+                        name: "Games",
+                    },
+                    Segment {
+                        color: egui::Color32::BLUE,
+                        ms: 7 * 60_000,
+                        dimmed: false,
+                        name: "Browsers",
+                    },
+                ],
+                today: false,
+                future: false,
+                slice_detail: Some("Sunday, Nov 1".into()),
+            })
+            .collect();
+        let chart_frame = |events| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1100.0, 500.0))),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    widgets::stacked_bars(ui, &bars, false, 160.0);
+                },
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let output = chart_frame(vec![]);
+        let label = text_rects(&output, "day-0")[0];
+        let pointer = pos2(label.center().x, label.top() - 40.0);
+        chart_frame(vec![egui::Event::PointerMoved(pointer)]);
+        let output = chart_frame(vec![]);
+        for label in ["Games", "2h", "Sunday, Nov 1 · 2h 07m total"] {
+            assert!(!text_rects(&output, label).is_empty(), "{label}");
+        }
+    }
+
+    #[test]
+    fn grouped_app_shows_its_running_source_and_blocks_corrections_while_busy() {
         use crate::dashboard::AppInfo;
+        use tempora::model::{CAPABILITY_RESET_APP, CAPABILITY_UNGROUP_APP, ControlRequest};
+
         let ctx = Context::default();
         let mut dashboard = Dashboard::for_test(&ctx);
-        dashboard.recorder = Some(RecorderStatus {
-            capabilities: vec![tempora::model::CAPABILITY_UNGROUP_APP.into()],
-            ..status(true)
-        });
         let key = "steam:1086940".to_owned();
         let source = r"exe:c:\games\a-copy.exe".to_owned();
+        dashboard.recorder = Some(RecorderStatus {
+            candidates: vec![AppIdentity {
+                key: source.clone(),
+                name: "Running copy".into(),
+                category: Category::Games,
+            }],
+            capabilities: vec![CAPABILITY_UNGROUP_APP.into(), CAPABILITY_RESET_APP.into()],
+            ..status(true)
+        });
+        let (send, jobs) = std::sync::mpsc::channel();
+        dashboard.jobs = send;
         let report = report(&dashboard);
         let app = report.apps[0].clone();
         let key_report = (dashboard.nav.view.range, dashboard.nav.view.exclude_idle);
@@ -606,21 +669,33 @@ mod render_tests {
             Ok(Arc::new(AppInfo {
                 all_time: Some(app),
                 sources: vec![key.clone(), source.clone()],
-                automatic: None,
+                automatic: Some(("Original game".into(), Category::Games)),
             })),
         );
         dashboard.nav.drill(Page::App(key.clone()));
+        dashboard.pending = true;
         let output = frame(&ctx, &mut dashboard, [1100.0, 1600.0]);
         assert!(has(&output, "Includes 2 sources"), "{:?}", texts(&output));
-        assert!(has(&output, "Remove from group"), "{:?}", texts(&output));
-        assert_eq!(
-            texts(&output)
-                .iter()
-                .filter(|text| *text == "Remove from group")
-                .count(),
-            1,
-            "only the non-representative source gets the control"
+        assert!(has(&output, "Running now"), "the grouped copy is running");
+        let remove = text_rects(&output, "Remove from group");
+        assert_eq!(remove.len(), 1, "only the copy can be removed");
+        let reset = text_rects(&output, "Reset")[0].center();
+        for at in [remove[0].center(), reset] {
+            pointer_click(&ctx, &mut dashboard, at, egui::PointerButton::Primary);
+        }
+        assert!(
+            jobs.try_recv().is_err(),
+            "both commands wait for the recorder"
         );
+
+        dashboard.pending = false;
+        frame(&ctx, &mut dashboard, [1100.0, 1600.0]);
+        pointer_click(&ctx, &mut dashboard, reset, egui::PointerButton::Primary);
+        assert!(matches!(
+            jobs.try_recv(),
+            Ok(crate::dashboard::Job::Control(ControlRequest::ResetApp { key: reset_key }, _))
+                if reset_key == key
+        ));
     }
 
     #[test]
@@ -843,7 +918,6 @@ mod render_tests {
                 "Export sessions to CSV",
                 "Back up database",
                 "Delete all history…",
-                "Change history",
                 "Recorder",
                 "Closing this window doesn't stop recording.",
             ] {
@@ -856,28 +930,88 @@ mod render_tests {
         }
     }
 
-    /// Hover, then a secondary press and release on `at`, one frame per step.
-    fn secondary_click(ctx: &Context, dashboard: &mut Dashboard, at: egui::Pos2) {
-        let frame_input = |events: Vec<egui::Event>| egui::RawInput {
-            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1100.0, 1600.0))),
-            events,
-            ..egui::RawInput::default()
-        };
-        let button = |pressed| egui::Event::PointerButton {
+    fn pointer_frame(
+        ctx: &Context,
+        dashboard: &mut Dashboard,
+        events: Vec<egui::Event>,
+    ) -> FullOutput {
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1100.0, 1600.0))),
+                events,
+                ..egui::RawInput::default()
+            },
+            |ui| dashboard.draw_shell(ui),
+        );
+        output.textures_delta.clear();
+        output
+    }
+
+    /// Hover, then press and release on `at`, one frame per step.
+    fn pointer_click(
+        ctx: &Context,
+        dashboard: &mut Dashboard,
+        at: egui::Pos2,
+        button: egui::PointerButton,
+    ) {
+        let event = |pressed| egui::Event::PointerButton {
             pos: at,
-            button: egui::PointerButton::Secondary,
+            button,
             pressed,
             modifiers: egui::Modifiers::NONE,
         };
         let steps = [
             vec![egui::Event::PointerMoved(at)],
-            vec![button(true)],
-            vec![button(false)],
+            vec![event(true)],
+            vec![event(false)],
         ];
         for events in steps {
-            ctx.run_ui(frame_input(events), |ui| dashboard.draw_shell(ui))
-                .textures_delta
-                .clear();
+            pointer_frame(ctx, dashboard, events);
+        }
+    }
+
+    fn secondary_click(ctx: &Context, dashboard: &mut Dashboard, at: egui::Pos2) {
+        pointer_click(ctx, dashboard, at, egui::PointerButton::Secondary);
+    }
+
+    #[test]
+    fn title_bar_drag_uses_the_press_position_when_the_first_move_arrives_with_it() {
+        for from_tab in [true, false] {
+            let ctx = Context::default();
+            let mut dashboard = Dashboard::for_test(&ctx);
+            dashboard.recorder = Some(status(true));
+            let output = frame(&ctx, &mut dashboard, [1100.0, 1600.0]);
+            let tab = text_rects(&output, "Library")[0].center();
+            let start = if from_tab { tab } else { pos2(tab.x, 65.0) };
+            let moved = pos2(tab.x + 30.0, 65.0);
+            pointer_frame(&ctx, &mut dashboard, vec![egui::Event::PointerMoved(start)]);
+            let press = pointer_frame(
+                &ctx,
+                &mut dashboard,
+                vec![
+                    egui::Event::PointerButton {
+                        pos: start,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                    egui::Event::PointerMoved(moved),
+                ],
+            );
+            let drag = pointer_frame(
+                &ctx,
+                &mut dashboard,
+                vec![egui::Event::PointerMoved(moved + vec2(1.0, 0.0))],
+            );
+            let started = [press, drag].iter().any(|frame| {
+                frame.viewport_output.values().any(|viewport| {
+                    viewport
+                        .commands
+                        .iter()
+                        .any(|command| matches!(command, egui::ViewportCommand::StartDrag))
+                })
+            });
+            assert_eq!(started, !from_tab, "drag starting at {start:?}");
         }
     }
 
@@ -914,6 +1048,45 @@ mod render_tests {
             texts(&output)
         );
         assert!(has(&output, "Stop tracking this app"));
+    }
+
+    /// A right-click on a Library row opens the same app menu as its ⋯ button, at the pointer.
+    #[test]
+    fn right_click_on_a_library_row_opens_the_app_menu() {
+        let ctx = Context::default();
+        let mut dashboard = Dashboard::for_test(&ctx);
+        dashboard.recorder = Some(status(true));
+        let key = (dashboard.nav.view.range, dashboard.nav.view.exclude_idle);
+        dashboard
+            .report
+            .finish(key, Ok(Arc::new(report(&dashboard))));
+        dashboard.nav.section(Page::Library);
+        let output = frame(&ctx, &mut dashboard, [1100.0, 1600.0]);
+        let rows = text_rects(&output, "Firefox");
+        assert_eq!(
+            rows.len(),
+            1,
+            "one Library row for Firefox: {:?}",
+            texts(&output)
+        );
+        let at = rows[0].center();
+        secondary_click(&ctx, &mut dashboard, at);
+        match &dashboard.popup {
+            Some(Popup::AppMenu(app, anchor)) => {
+                assert_eq!(
+                    app, r"exe:c:\firefox.exe",
+                    "the menu is for the clicked row"
+                );
+                assert_eq!(anchor.min, at, "anchored at the pointer");
+            }
+            _ => panic!("a right-click on a Library row opens the app menu"),
+        }
+        let output = frame(&ctx, &mut dashboard, [1100.0, 1600.0]);
+        assert!(
+            has(&output, "Edit app…"),
+            "the menu draws: {:?}",
+            texts(&output)
+        );
     }
 
     /// A right-click on a This day row opens the app menu for that app, on the day page.
@@ -1030,7 +1203,7 @@ mod render_tests {
         dashboard.toast = Some(crate::dashboard::Toast {
             message: "Saved".into(),
             error: false,
-            undo: false,
+            undo: None,
             shown: std::time::Instant::now() - std::time::Duration::from_secs(5),
         });
         ctx.run_ui(egui::RawInput::default(), |ui| {
@@ -1042,7 +1215,7 @@ mod render_tests {
         dashboard.toast = Some(crate::dashboard::Toast {
             message: "App updated".into(),
             error: false,
-            undo: true,
+            undo: Some("Undo"),
             shown: std::time::Instant::now() - std::time::Duration::from_secs(5),
         });
         let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {

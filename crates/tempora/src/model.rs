@@ -252,6 +252,27 @@ pub enum ControlRequest {
     UngroupApp {
         key: String,
     },
+    /// Applies one app correction and associates it with an in-memory undo token.
+    TrackCorrection {
+        token: u64,
+        command: Box<ControlRequest>,
+    },
+    /// Undoes a correction only if its token still belongs to the top of the stack.
+    UndoTrackedCorrection {
+        token: u64,
+    },
+}
+
+impl ControlRequest {
+    pub fn is_app_correction(&self) -> bool {
+        matches!(
+            self,
+            Self::EditApp { .. }
+                | Self::GroupApps { .. }
+                | Self::ResetApp { .. }
+                | Self::UngroupApp { .. }
+        )
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -275,6 +296,7 @@ pub struct RecorderStatus {
 
 pub const CAPABILITY_RESET_APP: &str = "reset-app";
 pub const CAPABILITY_UNGROUP_APP: &str = "ungroup-app";
+pub const CAPABILITY_TRACKED_UNDO: &str = "tracked-undo";
 
 pub fn database_path() -> io::Result<PathBuf> {
     let local = std::env::var_os("LOCALAPPDATA")
@@ -331,6 +353,29 @@ mod tests {
         assert!(matches!(
             serde_json::from_str::<ControlRequest>(&request),
             Ok(ControlRequest::UngroupApp { key }) if key == r"exe:c:\games\game.exe"
+        ));
+    }
+
+    #[test]
+    fn tracked_correction_and_undo_round_trip_with_the_same_token() {
+        let command = ControlRequest::TrackCorrection {
+            token: u64::MAX,
+            command: Box::new(ControlRequest::ResetApp {
+                key: "steam:1".into(),
+            }),
+        };
+        let json = serde_json::to_string(&command).unwrap();
+        assert!(matches!(
+            serde_json::from_str::<ControlRequest>(&json),
+            Ok(ControlRequest::TrackCorrection { token: u64::MAX, command })
+                if matches!(command.as_ref(), ControlRequest::ResetApp { key } if key == "steam:1")
+        ));
+        let json =
+            serde_json::to_string(&ControlRequest::UndoTrackedCorrection { token: u64::MAX })
+                .unwrap();
+        assert!(matches!(
+            serde_json::from_str::<ControlRequest>(&json),
+            Ok(ControlRequest::UndoTrackedCorrection { token: u64::MAX })
         ));
     }
 }
