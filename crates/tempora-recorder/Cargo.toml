@@ -1,0 +1,25 @@
+[package]
+name = "tempora-recorder"
+description = "Tempora's background recorder: the notification-area app that writes history."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "tempora-recorder"
+path = "src/main.rs"
+
+[dependencies]
+tempora.workspace = true
+anyhow.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
+
+[build-dependencies]
+winresource.workspace = true
+
+[lints]
+workspace = true

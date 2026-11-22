@@ -1,0 +1,22 @@
+name: Wrong app recognition
+description: Report a game or app that Tempora identified incorrectly
+body:
+  - type: textarea
+    id: observed
+    attributes:
+      label: What did Tempora show?
+      description: Include the displayed name and category.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What should it show?
+      description: Include the expected name, category, and launcher if relevant.
+    validations:
+      required: true
+  - type: input
+    id: executable_path
+    attributes:
+      label: Executable path (optional)
+      description: This is a public issue and the path may reveal folder names, including your Windows username. Redact those parts or leave the field blank.

@@ -1,0 +1,24 @@
+[package]
+name = "tempora"
+description = "Recording, recognition and history storage for Tempora."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+thiserror.workspace = true
+chrono.workspace = true
+chrono-tz.workspace = true
+csv.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha1.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
+
+[lints]
+workspace = true

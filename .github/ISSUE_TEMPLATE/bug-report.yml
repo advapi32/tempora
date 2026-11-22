@@ -1,0 +1,33 @@
+name: Bug report
+description: Report a problem using Tempora
+body:
+  - type: input
+    id: windows_version
+    attributes:
+      label: Windows version and build
+      description: Run winver to find these details.
+    validations:
+      required: true
+  - type: input
+    id: app_version
+    attributes:
+      label: Tempora version
+    validations:
+      required: true
+  - type: dropdown
+    id: distribution
+    attributes:
+      label: How are you running the app?
+      options:
+        - Installer
+        - Portable zip
+        - Built from source
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Describe what happened and what you expected. Leave out recorded history and personal paths.
+    validations:
+      required: true

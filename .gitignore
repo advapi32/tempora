@@ -1,0 +1,27 @@
+# Rust build output (debug/release builds, QA probes, preview exes)
+/target/
+
+# Packaged releases; rebuild from source instead of committing zips
+/dist/
+
+# Debug symbols and stray binaries outside target/
+*.pdb
+*.exe
+
+# Local databases, logs and backups from manual testing
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+*.writer.lock
+*.log
+
+# Editors and tools
+.vscode/
+.idea/
+*.swp
+.claude/settings.local.json
+
+# Windows
+Thumbs.db
+desktop.ini
+$RECYCLE.BIN/

@@ -1,0 +1,41 @@
+name: Draft release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@v2.9.3
+      - name: Ensure Inno Setup 6 is available
+        shell: bash
+        run: |
+          if ! bash scripts/package.sh --find-iscc; then
+            choco install innosetup -y
+          fi
+      - name: Build packages
+        shell: bash
+        run: bash scripts/package.sh
+      - name: Create draft release with both packages
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          shopt -s nullglob
+          portable=(dist/Tempora-*-x64-portable.zip)
+          installer=(dist/Tempora-Setup-*-x64.exe)
+          if (( ${#portable[@]} != 1 || ${#installer[@]} != 1 )); then
+            printf '%s\n' 'Expected one portable zip and one installer in dist/.' >&2
+            exit 1
+          fi
+          gh release create "$GITHUB_REF_NAME" --draft --verify-tag --title "$GITHUB_REF_NAME" \
+            "${portable[@]}" "${installer[@]}"
