@@ -300,10 +300,14 @@ pub(super) fn other_focus_ms(apps: &[DayApp], palette: &HashMap<String, usize>) 
 pub(super) fn window(vm: &DayVm, zoom: DayZoom) -> (i64, i64) {
     match zoom {
         DayZoom::FullDay => vm.day,
-        DayZoom::Custom { from, to } => {
+        DayZoom::Custom { from, to, length } => {
             let start = format::clock_instant(vm.date, from.ms, from.repeat, vm.zone);
             let end = format::clock_instant(vm.date, to.ms, to.repeat, vm.zone);
-            fit(start, end - start, vm.day)
+            fit(
+                start,
+                if end > start { end - start } else { length },
+                vm.day,
+            )
         }
         DayZoom::Evening => (
             format::clock_instant(vm.date, 17 * HOUR, false, vm.zone).min(vm.day.1),
@@ -368,14 +372,17 @@ pub(super) fn pan_window(window: (i64, i64), day: (i64, i64), by: i64) -> (i64, 
     fit(window.0 + by, window.1 - window.0, day)
 }
 
-/// The zoom that shows `window`: the whole day, or a custom span of it in clock times.
-pub(super) fn zoom_for(window: (i64, i64), vm: &DayVm) -> DayZoom {
-    if window == vm.day {
+/// The zoom that shows `window`, a custom span in clock times. `preset` is the preset the
+/// lane would reset to; zooming out to the whole day from 24 hours is just that preset again,
+/// but from any other preset it stays a custom span, so a reset still goes back to it.
+pub(super) fn zoom_for(window: (i64, i64), vm: &DayVm, preset: DayZoom) -> DayZoom {
+    if window == vm.day && preset == DayZoom::FullDay {
         DayZoom::FullDay
     } else {
         DayZoom::Custom {
             from: clock(window.0, vm),
             to: clock(window.1, vm),
+            length: window.1 - window.0,
         }
     }
 }

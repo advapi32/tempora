@@ -340,6 +340,19 @@ impl Dashboard {
             .map(|(_, report)| report.clone())
     }
 
+    /// The label for the range the report on screen covers: the selected range, or while the
+    /// next one loads, the previous range that report belongs to. Captions that describe the
+    /// data use this, so old numbers are never labelled with the new dates.
+    pub(super) fn report_range_label(&self) -> String {
+        let key = self.report_key();
+        match self.report.shown(&key) {
+            Some((loaded, _)) if *loaded != key => {
+                format::range_label(loaded.0, nav::Period::Custom)
+            }
+            _ => format::range_label(self.nav.view.range, self.nav.view.period),
+        }
+    }
+
     /// Whether `current_report` is still the previous range's.
     pub(super) fn report_is_stale(&self) -> bool {
         let key = self.report_key();

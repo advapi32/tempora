@@ -1321,7 +1321,7 @@ mod render_tests {
         let y = start.center().y + 8.0 + 14.0 + 22.0;
         let x = |share: f32| start.left() + (end.right() - start.left()) * share;
         let span = |dashboard: &Dashboard| match dashboard.nav.view.zoom {
-            DayZoom::Custom { from, to } => (from.ms, to.ms),
+            DayZoom::Custom { from, to, .. } => (from.ms, to.ms),
             other => panic!("expected a custom zoom, got {other:?}"),
         };
         let near = |actual: i64, expected: i64| (actual - expected).abs() <= 2 * 60_000;
@@ -1392,6 +1392,9 @@ mod render_tests {
         drag(&ctx, &mut dashboard, pos2(x(0.25), y), pos2(x(0.75), y));
         release(&ctx, &mut dashboard, pos2(x(0.75), y));
         span(&dashboard);
+        // Firefox is highlighted; the double-click lands on the game's block.
+        let firefox = Some(r"exe:c:\firefox.exe".to_owned());
+        dashboard.nav.view.lane_app = firefox.clone();
         for _ in 0..2 {
             pointer_click(
                 &ctx,
@@ -1406,8 +1409,63 @@ mod render_tests {
             "a double-click zooms back out"
         );
         assert_eq!(
-            dashboard.nav.view.lane_app, None,
+            dashboard.nav.view.lane_app, firefox,
             "and its two clicks leave the highlight as it was"
+        );
+
+        dashboard.nav.view.set_zoom(DayZoom::Evening);
+        frame(&ctx, &mut dashboard, [1100.0, 1600.0]);
+        pointer_frame(
+            &ctx,
+            &mut dashboard,
+            vec![
+                egui::Event::PointerMoved(pos2(x(0.5), y)),
+                egui::Event::Zoom(0.01),
+            ],
+        );
+        assert!(
+            dashboard.nav.view.zoomed(),
+            "zoomed all the way out from Evening: {:?}",
+            dashboard.nav.view.zoom
+        );
+        pointer_frame(&ctx, &mut dashboard, escape());
+        assert_eq!(
+            dashboard.nav.view.zoom,
+            DayZoom::Evening,
+            "a reset still goes back to Evening"
+        );
+    }
+
+    #[test]
+    fn app_detail_labels_old_sessions_with_their_own_range_while_the_next_loads() {
+        use crate::dashboard::nav::Period;
+        let ctx = Context::default();
+        let mut dashboard = Dashboard::for_test(&ctx);
+        dashboard.recorder = Some(status(true));
+        let week = dashboard.nav.view.range;
+        let report = report(&dashboard);
+        dashboard.report.finish((week, false), Ok(Arc::new(report)));
+        dashboard.nav.drill(Page::App("steam:1086940".into()));
+        frame(&ctx, &mut dashboard, [1100.0, 1600.0]);
+        // Step back a week; its report hasn't arrived.
+        let previous = crate::dashboard::nav::period_range(
+            Period::Week,
+            week.start - chrono::Days::new(7),
+            dashboard.prefs.week_start,
+        );
+        dashboard.nav.set_range(Period::Week, previous);
+        let output = frame(&ctx, &mut dashboard, [1100.0, 1600.0]);
+        let old = crate::dashboard::format::range_label(week, Period::Custom);
+        let new = crate::dashboard::format::range_label(previous, Period::Week);
+        assert!(
+            has(&output, &format!("in {old}")),
+            "the old sessions keep their week: {:?}",
+            texts(&output)
+        );
+        assert!(
+            !has(&output, &format!("in {new}")),
+            "and aren't labelled with the new one: {:?}",
+            texts(&output)
         );
     }
 

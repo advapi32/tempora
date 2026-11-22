@@ -321,6 +321,18 @@ impl Dashboard {
         let shown_highlight = previewed.as_deref().or(highlight);
         let mut action = None;
         let zoomed = self.nav.view.zoomed();
+        // The preset a reset would go back to.
+        let preset = if zoomed {
+            self.nav.view.zoom_base
+        } else {
+            self.nav.view.zoom
+        };
+        // The highlight before a click on the lane, so a double-click, whose two clicks each
+        // toggle it, can put it back.
+        let lane_app = self.nav.view.lane_app.clone();
+        let before_click = ui.id().with("highlight-before-click");
+        let now = ui.input(|input| input.time);
+        let mut restore_highlight = None;
         let base = match self.nav.view.zoom_base {
             DayZoom::FullDay => "24 hours",
             DayZoom::Evening => "the evening",
@@ -436,9 +448,17 @@ impl Dashboard {
             {
                 action = Some(DayAction::Menu(key, pointer_anchor(pos)));
             }
-            if let Some(index) = response.clicked
+            if response.reset {
+                if let Some((at, previous)) =
+                    ui.data(|data| data.get_temp::<(f64, Option<String>)>(before_click))
+                    && now - at < 1.0
+                {
+                    restore_highlight = Some(previous);
+                }
+            } else if let Some(index) = response.clicked
                 && let Some(key) = foreground_apps[index].clone()
             {
+                ui.data_mut(|data| data.insert_temp(before_click, (now, lane_app.clone())));
                 let next = if highlight == Some(key.as_str()) {
                     None
                 } else {
@@ -451,17 +471,19 @@ impl Dashboard {
                 action = Some(DayAction::Zoom(zoom_for(
                     fit(start, end - start, vm.day),
                     vm,
+                    preset,
                 )));
             }
             if let Some((pointer, factor)) = response.zoom {
                 let zoomed = zoom_window(target, vm.day, ms_at(pointer), pointer, factor);
-                action = Some(DayAction::Zoom(zoom_for(zoomed, vm)));
+                action = Some(DayAction::Zoom(zoom_for(zoomed, vm, preset)));
             }
             if let Some(by) = response.pan {
                 let by = ((shown.1 - shown.0) as f64 * f64::from(by)).round() as i64;
                 action = Some(DayAction::Zoom(zoom_for(
                     pan_window(target, vm.day, by),
                     vm,
+                    preset,
                 )));
             }
             // A double-click resets the zoom alongside the clicks it is made of, which toggle
@@ -540,6 +562,9 @@ impl Dashboard {
         });
         if reset && self.dialog.is_none() && self.popup.is_none() {
             self.nav.view.reset_zoom();
+        }
+        if let Some(previous) = restore_highlight {
+            self.nav.view.lane_app = previous;
         }
         action
     }
@@ -750,7 +775,18 @@ mod tests {
             day,
             "zooming out stops at the whole day"
         );
-        assert_eq!(zoom_for(day, &active_day(day, &[])), DayZoom::FullDay);
+        assert_eq!(
+            zoom_for(day, &active_day(day, &[]), DayZoom::FullDay),
+            DayZoom::FullDay,
+            "zooming out to the whole day from 24 hours is just 24 hours"
+        );
+        assert!(
+            matches!(
+                zoom_for(day, &active_day(day, &[]), DayZoom::Evening),
+                DayZoom::Custom { .. }
+            ),
+            "from Evening it stays a custom zoom, so a reset goes back to Evening"
+        );
     }
 
     #[test]
@@ -778,12 +814,13 @@ mod tests {
             format::clock_instant(saturday, 9 * HOUR, false, zone),
             format::clock_instant(saturday, 10 * HOUR, false, zone),
         );
-        let zoom = zoom_for(picked, &before);
+        let zoom = zoom_for(picked, &before, DayZoom::Active);
         assert_eq!(
             zoom,
             DayZoom::Custom {
                 from: ClockTime::at(9 * HOUR),
-                to: ClockTime::at(10 * HOUR)
+                to: ClockTime::at(10 * HOUR),
+                length: HOUR,
             }
         );
         let (start, end) = window(&change, zoom);
@@ -818,13 +855,14 @@ mod tests {
             second(2 * HOUR + 15 * MINUTE),
             second(2 * HOUR + 45 * MINUTE),
         );
-        let zoom = zoom_for(picked, &vm);
+        let zoom = zoom_for(picked, &vm, DayZoom::Active);
         assert!(
             matches!(
                 zoom,
                 DayZoom::Custom {
                     from: ClockTime { repeat: true, .. },
-                    to: ClockTime { repeat: true, .. }
+                    to: ClockTime { repeat: true, .. },
+                    ..
                 }
             ),
             "{zoom:?}"
@@ -841,6 +879,29 @@ mod tests {
             ],
             "the repeated hour still has its ticks"
         );
+    }
+
+    #[test]
+    fn a_span_across_the_autumn_change_keeps_its_length_on_the_next_day() {
+        let zone = chrono_tz::Europe::Berlin;
+        // Clocks in Berlin fall back from 03:00 to 02:00 on Sunday, October 25, 2026.
+        let date = NaiveDate::from_ymd_opt(2026, 10, 25).unwrap();
+        let instants = |ms| format::clock_instants(date, ms, zone);
+        // From the first 02:45 to the second 02:15: half an hour.
+        let picked = (
+            instants(2 * HOUR + 45 * MINUTE)[0],
+            instants(2 * HOUR + 15 * MINUTE)[1],
+        );
+        assert_eq!(picked.1 - picked.0, 30 * MINUTE);
+        let zoom = zoom_for(picked, &day_in(date, zone), DayZoom::Active);
+        let next = date + Days::new(1);
+        let (start, end) = window(&day_in(next, zone), zoom);
+        assert_eq!(
+            end - start,
+            30 * MINUTE,
+            "reversed clock endpoints fall back to the picked length"
+        );
+        assert_eq!(format::local(start, zone, "%H:%M"), "02:45");
     }
 
     #[test]
@@ -888,7 +949,11 @@ mod tests {
     #[test]
     fn a_picked_zoom_keeps_its_hours_on_another_day() {
         let day = test_day();
-        let zoom = zoom_for((day.0 + 9 * HOUR, day.0 + 10 * HOUR), &active_day(day, &[]));
+        let zoom = zoom_for(
+            (day.0 + 9 * HOUR, day.0 + 10 * HOUR),
+            &active_day(day, &[]),
+            DayZoom::Active,
+        );
         assert_eq!(
             window(&active_day(day, &[]), zoom),
             (day.0 + 9 * HOUR, day.0 + 10 * HOUR)

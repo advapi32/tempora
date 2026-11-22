@@ -230,7 +230,7 @@ impl Dashboard {
         };
         let ungroup_blocked = correction_blocked(CAPABILITY_UNGROUP_APP);
         let reset_blocked = correction_blocked(CAPABILITY_RESET_APP);
-        let range_label = format::range_label(self.nav.view.range, self.nav.view.period);
+        let range_label = self.report_range_label();
         let main = |ui: &mut Ui, this: &mut Self| -> Option<DetailAction> {
             match &vm.range {
                 Some(range) => {
@@ -239,7 +239,7 @@ impl Dashboard {
                     trend.or(sessions)
                 }
                 None => {
-                    let label = format::range_label(this.nav.view.range, this.nav.view.period);
+                    let label = this.report_range_label();
                     widgets::empty_state(
                         ui,
                         "No activity in this range",
@@ -495,7 +495,7 @@ impl Dashboard {
                     format!(
                         "{}, days with activity in {}",
                         vm.name,
-                        format::range_label(self.nav.view.range, self.nav.view.period)
+                        self.report_range_label()
                     ),
                     Tokens::CAPTION,
                     colors.fg_subtle,
@@ -581,11 +581,7 @@ impl Dashboard {
                 crate::dashboard::theme::section(ui, "Sessions");
                 ui.label(
                     widgets::mono(
-                        format!(
-                            "{} in {}",
-                            range.sessions,
-                            format::range_label(self.nav.view.range, self.nav.view.period)
-                        ),
+                        format!("{} in {}", range.sessions, self.report_range_label()),
                         Tokens::CAPTION,
                     )
                     .color(colors.fg_subtle),

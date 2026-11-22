@@ -64,6 +64,9 @@ pub(super) enum DayZoom {
     Custom {
         from: ClockTime,
         to: ClockTime,
+        /// The span's length when picked. Endpoints picked on either side of an autumn clock
+        /// change can come out reversed on another day; the length keeps the span whole.
+        length: i64,
     },
 }
 
@@ -424,10 +427,12 @@ mod tests {
         nav.view.set_zoom(DayZoom::Custom {
             from: ClockTime::at(1),
             to: ClockTime::at(2),
+            length: 1,
         });
         nav.view.set_zoom(DayZoom::Custom {
             from: ClockTime::at(1),
             to: ClockTime::at(3),
+            length: 2,
         });
         assert!(nav.view.zoomed());
         nav.view.reset_zoom();

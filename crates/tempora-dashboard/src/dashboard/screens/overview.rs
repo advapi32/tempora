@@ -326,7 +326,7 @@ impl Dashboard {
             // A hovered chip previews its filter in the chart.
             let previewed = self.category_chips(ui, vm);
             let opened = if table {
-                day_table(ui, vm, self.nav.view.range, self.nav.view.period)
+                day_table(ui, vm, &self.report_range_label())
             } else {
                 day_chart(ui, vm, previewed.or(self.nav.view.category), plot)
             };
@@ -613,12 +613,7 @@ fn day_chart(ui: &mut Ui, vm: &OverviewVm, only: Option<Category>, plot: f32) ->
 }
 
 /// The chart's text equivalent: focused time per day and category.
-fn day_table(
-    ui: &mut Ui,
-    vm: &OverviewVm,
-    range: tempora::model::DateRange,
-    period: Period,
-) -> Option<NaiveDate> {
+fn day_table(ui: &mut Ui, vm: &OverviewVm, range_label: &str) -> Option<NaiveDate> {
     let colors = Tokens::get(ui);
     let categories: Vec<Category> = vm.chips.iter().map(|(category, _)| *category).collect();
     let width = ui.available_width();
@@ -631,10 +626,7 @@ fn day_table(
     specs.push(Column::new("Total", Width::Fixed(80.0), Align::Max));
     let columns = widgets::scrolled_columns(ui, width, &specs);
     ui.label(widgets::text(
-        format!(
-            "Focused time per day and category, {}",
-            format::range_label(range, period)
-        ),
+        format!("Focused time per day and category, {}", range_label),
         Tokens::CAPTION,
         colors.fg_subtle,
     ));
