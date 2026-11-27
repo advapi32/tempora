@@ -24,7 +24,10 @@ pub(super) fn prepare_observer(
         .iter()
         .filter(|key| AppKey::parse(key).package().is_some())
     {
-        if let Some(identity) = observer.reidentify_package(key) {
+        let Ok(Some((stored_name, _))) = store.automatic_identity(key) else {
+            continue;
+        };
+        if let Some(identity) = observer.reidentify_package(key, &stored_name) {
             let _ = store.refresh_automatic(&identity.key, &identity.name, identity.category);
         }
     }

@@ -1,7 +1,11 @@
+pub mod catalog;
 mod game_store;
+mod installed;
 mod names;
 mod package_names;
 mod products;
+#[cfg(windows)]
+mod registry;
 mod steam;
 mod version_info;
 
@@ -10,9 +14,13 @@ use std::path::Path;
 
 use crate::model::{AppIdentity, AppKey, Category};
 
+pub use catalog::Catalog;
+pub use installed::{InstalledApp, InstalledApps};
+
 #[cfg(windows)]
 use game_store::RegistryGameEntries;
 use game_store::{GameEntries, GameMatch, match_game};
+use installed::Installed;
 use package_names::PackageNames;
 #[cfg(windows)]
 use package_names::ShellPackageNames;
@@ -26,13 +34,15 @@ pub struct Recognizer {
     games: Box<dyn GameEntries>,
     versions: Box<dyn VersionSource>,
     packages: Box<dyn PackageNames>,
+    installed: Installed,
+    catalog: Catalog,
     /// Keys of executables whose window has been seen covering a whole monitor.
     fullscreen_seen: HashSet<String>,
 }
 
 impl Default for Recognizer {
-    /// Uses Windows' game list, the file's version resource and the shell's Apps folder on
-    /// Windows. Elsewhere all three are empty.
+    /// Uses Windows' game list, the file's version resource, the shell's Apps folder, the
+    /// Uninstall entries and the built-in WinGet catalog on Windows. Elsewhere all are empty.
     fn default() -> Self {
         #[cfg(windows)]
         let (games, versions, packages): (
@@ -44,6 +54,10 @@ impl Default for Recognizer {
             Box::new(FileVersionSource),
             Box::new(ShellPackageNames),
         );
+        #[cfg(windows)]
+        let installed: Box<dyn InstalledApps> = Box::new(installed::RegistryInstalled);
+        #[cfg(not(windows))]
+        let installed: Box<dyn InstalledApps> = Box::new(NoInstalledApps);
         #[cfg(not(windows))]
         let (games, versions, packages): (
             Box<dyn GameEntries>,
@@ -55,6 +69,8 @@ impl Default for Recognizer {
             Box::new(NoPackageNames),
         );
         Self::with_sources(games, versions, packages)
+            .with_installed(installed)
+            .with_catalog(Catalog::embedded())
     }
 }
 
@@ -69,8 +85,20 @@ impl Recognizer {
             games,
             versions,
             packages,
+            installed: Installed::new(Box::new(NoInstalledApps)),
+            catalog: Catalog::empty(),
             fullscreen_seen: HashSet::new(),
         }
+    }
+
+    pub fn with_installed(mut self, installed: Box<dyn InstalledApps>) -> Self {
+        self.installed = Installed::new(installed);
+        self
+    }
+
+    pub fn with_catalog(mut self, catalog: Catalog) -> Self {
+        self.catalog = catalog;
+        self
     }
 
     /// Records that the executable with this key was seen covering a whole monitor.
@@ -82,8 +110,9 @@ impl Recognizer {
         self.fullscreen_seen.extend(keys);
     }
 
-    /// Recognizes an executable from installed-product, Steam and Windows game-list evidence.
-    /// Returns `None` for filtered helper processes. Ordinary apps retain their fallback key.
+    /// Recognizes an executable from installed-product, Steam and Windows game-list evidence,
+    /// then categorizes what is left from the WinGet catalog. Returns `None` for filtered helper
+    /// processes. Ordinary apps retain their fallback key.
     pub fn identify_executable(
         &mut self,
         path: &Path,
@@ -125,17 +154,29 @@ impl Recognizer {
                 _ => Category::Other,
             };
         }
+        if fallback.category == Category::Other
+            && let Some(category) = self.catalog_category(path, file_name, version.as_ref())
+        {
+            fallback.category = category;
+        }
         if let Some(name) = names::executable_name(version.as_ref()) {
             fallback.name = name;
         }
         Some(fallback)
     }
 
-    /// Identifies a known product by its canonical key. For other packages, preserves the key and
-    /// category and uses the shell display name if available. A family alone skips shell lookup.
-    pub fn identify_package(&self, package: &str, fallback: AppIdentity) -> AppIdentity {
+    /// Identifies a known product by its canonical key. For other packages, preserves the key,
+    /// takes the catalog's category for the package family when the fallback has none, and uses
+    /// the shell display name if available. A family alone skips shell lookup.
+    pub fn identify_package(&self, package: &str, mut fallback: AppIdentity) -> AppIdentity {
         if let Some(known) = products::for_package(package) {
             return known;
+        }
+        if fallback.category == Category::Other {
+            let family = package.split(['!', ':']).next().unwrap_or(package);
+            if let Some(category) = self.catalog.package_family(family) {
+                fallback.category = category;
+            }
         }
         if !package.contains('!') {
             return fallback;
@@ -148,6 +189,30 @@ impl Recognizer {
             Some(name) => AppIdentity { name, ..fallback },
             None => fallback,
         }
+    }
+
+    /// The catalog's category for an executable: through the installed app that owns its folder,
+    /// or for a portable app through its file name and the publisher in its version resource.
+    fn catalog_category(
+        &mut self,
+        path: &Path,
+        file_name: &str,
+        version: Option<&VersionInfo>,
+    ) -> Option<Category> {
+        if self.catalog.is_empty() {
+            return None;
+        }
+        let catalog = self.catalog;
+        self.installed
+            .owner(path)
+            .and_then(|app| {
+                catalog.installed(
+                    &app.entry,
+                    app.display_name.as_deref(),
+                    app.publisher.as_deref(),
+                )
+            })
+            .or_else(|| catalog.executable(file_name, version?.company.as_deref()?))
     }
 
     /// The grouping fingerprint of an executable. The version resource is read only when the
@@ -247,6 +312,19 @@ fn is_helper(file_name: &str) -> bool {
             | "crashreportclient.exe"
             | "crashpad_handler.exe"
     )
+}
+
+/// No installed apps: the default outside Windows and in tests.
+struct NoInstalledApps;
+
+impl InstalledApps for NoInstalledApps {
+    fn stamp(&self) -> Option<u64> {
+        None
+    }
+
+    fn read(&self) -> Vec<InstalledApp> {
+        Vec::new()
+    }
 }
 
 #[cfg(not(windows))]
@@ -945,6 +1023,117 @@ mod tests {
             recognizer.identify_package("SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify", fallback());
         assert_eq!(app.category, Category::Media);
         assert_eq!(lookups.get(), 0);
+    }
+
+    struct FixedInstalled(Vec<InstalledApp>);
+
+    impl InstalledApps for FixedInstalled {
+        fn stamp(&self) -> Option<u64> {
+            Some(1)
+        }
+
+        fn read(&self) -> Vec<InstalledApp> {
+            self.0.clone()
+        }
+    }
+
+    /// A recognizer with a small catalog, one installed app under `D:\Tools\Obsidian`, and the
+    /// given game list entries and version resources.
+    fn with_catalog(games: &[(&str, GameEntry)], versions: &[(&str, VersionInfo)]) -> Recognizer {
+        let catalog = catalog::build(&[
+            ("n:obsidian|obsidian", Category::Productivity),
+            ("p:hades", Category::Development),
+            ("f:example.notes_abc123", Category::Productivity),
+            ("e:hwinfo64.exe|martin malik realix", Category::Utilities),
+            ("e:chrome.exe|google", Category::Development),
+        ]);
+        let installed = FixedInstalled(vec![InstalledApp {
+            entry: "bd400747-f0c1-5638-a859-982036102edf".into(),
+            display_name: Some("Obsidian 1.7.7".into()),
+            publisher: Some("Obsidian".into()),
+            folders: vec![r"d:\tools\obsidian".into()],
+        }]);
+        with_fakes(games, versions)
+            .0
+            .with_installed(Box::new(installed))
+            .with_catalog(catalog)
+    }
+
+    #[test]
+    fn the_catalog_categorizes_an_executable_through_its_installed_app() {
+        let mut recognizer = with_catalog(&[], &[]);
+        let app = identify(&mut recognizer, r"D:\Tools\Obsidian\Obsidian.exe");
+        assert_eq!(app.category, Category::Productivity);
+        let helper = identify(&mut recognizer, r"D:\Tools\Obsidian\resources\helper.exe");
+        assert_eq!(
+            helper.category,
+            Category::Productivity,
+            "the whole folder belongs to it"
+        );
+        let elsewhere = identify(&mut recognizer, r"D:\Tools\Other\Obsidian.exe");
+        assert_eq!(elsewhere.category, Category::Other);
+    }
+
+    #[test]
+    fn the_catalog_categorizes_a_portable_executable_only_with_its_publisher() {
+        let company = |name: &str| VersionInfo {
+            company: Some(name.into()),
+            ..VersionInfo::default()
+        };
+        let mut recognizer =
+            with_catalog(&[], &[("hwinfo64.exe", company("Martin Malik - REALiX"))]);
+        let app = identify(&mut recognizer, r"C:\Portable\HWiNFO\HWiNFO64.exe");
+        assert_eq!(app.category, Category::Utilities);
+
+        let mut recognizer = with_catalog(&[], &[("hwinfo64.exe", company("Someone Else"))]);
+        let app = identify(&mut recognizer, r"C:\Portable\HWiNFO\HWiNFO64.exe");
+        assert_eq!(app.category, Category::Other);
+    }
+
+    #[test]
+    fn stronger_evidence_wins_over_the_catalog() {
+        let google = VersionInfo {
+            company: Some("Google LLC".into()),
+            ..VersionInfo::default()
+        };
+        let mut recognizer = with_catalog(
+            &[("hades.exe", game(Some("1145360"), None, None))],
+            &[("chrome.exe", google)],
+        );
+        let game = identify(&mut recognizer, r"D:\Games\Hades\Hades.exe");
+        assert_eq!(game.category, Category::Games, "the game list wins");
+        let browser = identify(
+            &mut recognizer,
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        );
+        assert_eq!(
+            browser.category,
+            Category::Browsers,
+            "the built-in names win"
+        );
+    }
+
+    #[test]
+    fn the_catalog_categorizes_a_store_app_by_its_family() {
+        let recognizer = with_catalog(&[], &[]);
+        for package in ["Example.Notes_abc123!App", "example.notes_abc123"] {
+            assert_eq!(
+                recognizer.identify_package(package, fallback()).category,
+                Category::Productivity,
+                "{package}"
+            );
+        }
+        let edited = AppIdentity {
+            category: Category::Media,
+            ..fallback()
+        };
+        assert_eq!(
+            recognizer
+                .identify_package("Example.Notes_abc123!App", edited)
+                .category,
+            Category::Media,
+            "a category already set stays"
+        );
     }
 
     struct TempDirectory(PathBuf);

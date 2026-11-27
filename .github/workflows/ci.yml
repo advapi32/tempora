@@ -16,6 +16,7 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
+      - run: python -I -B scripts/catalog/test_extract.py
 
   # The `rust-version` declared in Cargo.toml must keep building.
   msrv:

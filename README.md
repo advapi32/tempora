@@ -75,6 +75,7 @@ While recording, it checks the foreground app and idle time about every 2 second
 | Foreground app | `GetForegroundWindow`, `GetWindowThreadProcessId`, `IsWindowVisible`, `GetWindowLongW`, `DwmGetWindowAttribute` |
 | Running apps | `EnumWindows`, `EnumChildWindows`, `CreateToolhelp32Snapshot`, `Process32FirstW`/`NextW`, `OpenProcess` (`PROCESS_QUERY_LIMITED_INFORMATION` only), `QueryFullProcessImageNameW`, `GetPackageFamilyName`, `GetApplicationUserModelId` |
 | Recognizing games | `RegOpenKeyExW`, `RegGetValueW` read Windows' game list in `HKEY_CURRENT_USER\System\GameConfigStore`. |
+| Categorizing apps | `RegOpenKeyExW`, `RegEnumKeyExW`, `RegQueryInfoKeyW`, `RegGetValueW` read the list of installed apps (`...\CurrentVersion\Uninstall` in `HKEY_LOCAL_MACHINE` and `HKEY_CURRENT_USER`): each entry's name, publisher and install folder. |
 | Naming apps | `GetFileVersionInfoSizeW`, `GetFileVersionInfoW`, `VerQueryValueW` read executable descriptions and product names from disk. `SHParseDisplayName` and `SHGetFileInfoW` look up Store app names with the shell. The lookup uses `CoInitializeEx`, `CoTaskMemFree` and `CoUninitialize` to manage its Windows resources. |
 | Local file checks | `QueryDosDeviceW` checks the drive mapping. Automatic file lookups skip network locations, redirected drives, and paths through symlinks or junctions. |
 | Fullscreen games | `GetWindowRect`, `MonitorFromWindow`, `GetMonitorInfoW` |
@@ -88,6 +89,8 @@ While recording, it checks the foreground app and idle time about every 2 second
 <summary><b>How apps are recognized</b></summary>
 
 Games come from Windows' own list of games, the one the Game Bar uses, so a title from any store or launcher lands in **Games** with its proper name. Steam and Riot games are matched to their install folders. An app Windows lists without a game ID counts as a game once it has been seen running fullscreen. Installs of the same game in two places are grouped into one entry. Other apps are named from their executable's description, or from the Start menu for Store apps.
+
+Apps get their category from a catalog of about 16,000 apps published in [WinGet](https://github.com/microsoft/winget-pkgs). The catalog is built into Tempora, so looking an app up never goes online. An app is matched through the installed app whose folder contains it, through its Store package, or, for a portable app, through its file name and publisher. Stronger evidence, such as Windows' game list, always wins over the catalog. [`scripts/catalog`](scripts/catalog) explains how the catalog is built.
 
 Anything recognized automatically can be corrected: your edits always win.
 

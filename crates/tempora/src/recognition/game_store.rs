@@ -109,7 +109,8 @@ pub struct RegistryGameEntries;
 impl GameEntries for RegistryGameEntries {
     fn entries(&self, file_name_lower: &str) -> Vec<GameEntry> {
         let hash = parent_hash(file_name_lower);
-        let Some(parents) = registry::Key::open(&format!(r"System\GameConfigStore\Parents\{hash}"))
+        let Some(parents) =
+            super::registry::Key::open(&format!(r"System\GameConfigStore\Parents\{hash}"))
         else {
             return Vec::new();
         };
@@ -118,8 +119,9 @@ impl GameEntries for RegistryGameEntries {
             .iter()
             .filter(|guid| !guid.contains('\\'))
             .filter_map(|guid| {
-                let child =
-                    registry::Key::open(&format!(r"System\GameConfigStore\Children\{guid}"))?;
+                let child = super::registry::Key::open(&format!(
+                    r"System\GameConfigStore\Children\{guid}"
+                ))?;
                 Some(GameEntry {
                     kind: child.dword("Type")?,
                     title_id: child.string("TitleId"),
@@ -128,124 +130,6 @@ impl GameEntries for RegistryGameEntries {
                 })
             })
             .collect()
-    }
-}
-
-#[cfg(windows)]
-mod registry {
-    use std::ffi::c_void;
-    use std::ptr;
-
-    use windows_sys::Win32::Foundation::ERROR_SUCCESS;
-    use windows_sys::Win32::System::Registry::{
-        HKEY, HKEY_CURRENT_USER, KEY_READ, REG_ROUTINE_FLAGS, RRF_RT_REG_DWORD,
-        RRF_RT_REG_MULTI_SZ, RRF_RT_REG_SZ, RegCloseKey, RegGetValueW, RegOpenKeyExW,
-    };
-
-    /// An open key under `HKEY_CURRENT_USER`, opened read-only and closed on drop.
-    pub(super) struct Key(HKEY);
-
-    impl Key {
-        pub(super) fn open(subkey: &str) -> Option<Self> {
-            let subkey = wide(subkey);
-            let mut key = ptr::null_mut();
-            // SAFETY: `subkey` is a NUL-terminated UTF-16 string that outlives the call, and
-            // `key` is a valid out pointer.
-            let status =
-                unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, subkey.as_ptr(), 0, KEY_READ, &mut key) };
-            (status == ERROR_SUCCESS && !key.is_null()).then_some(Self(key))
-        }
-
-        pub(super) fn string(&self, name: &str) -> Option<String> {
-            let data = self.value(name, RRF_RT_REG_SZ)?;
-            let units = u16_units(&data);
-            let text = units.split(|unit| *unit == 0).next()?;
-            let text = String::from_utf16(text).ok()?;
-            present_owned(text)
-        }
-
-        pub(super) fn multi_sz(&self, name: &str) -> Option<Vec<String>> {
-            let data = self.value(name, RRF_RT_REG_MULTI_SZ)?;
-            u16_units(&data)
-                .split(|unit| *unit == 0)
-                .filter(|part| !part.is_empty())
-                .map(String::from_utf16)
-                .collect::<Result<_, _>>()
-                .ok()
-        }
-
-        pub(super) fn dword(&self, name: &str) -> Option<u32> {
-            let data = self.value(name, RRF_RT_REG_DWORD)?;
-            Some(u32::from_le_bytes(data.as_slice().try_into().ok()?))
-        }
-
-        /// Reads a value of the requested type. The first call asks for the size, the second
-        /// fetches the data. Any failure, including a type mismatch, returns `None`.
-        fn value(&self, name: &str, value_type: REG_ROUTINE_FLAGS) -> Option<Vec<u8>> {
-            let name = wide(name);
-            let mut size = 0u32;
-            // SAFETY: a null data pointer asks only for the size, written to `size`.
-            let status = unsafe {
-                RegGetValueW(
-                    self.0,
-                    ptr::null(),
-                    name.as_ptr(),
-                    value_type,
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    &mut size,
-                )
-            };
-            if status != ERROR_SUCCESS {
-                return None;
-            }
-            let mut data = vec![0u8; size as usize];
-            // SAFETY: `data` has `size` bytes and `size` holds that length, so RegGetValueW
-            // writes within the buffer.
-            let status = unsafe {
-                RegGetValueW(
-                    self.0,
-                    ptr::null(),
-                    name.as_ptr(),
-                    value_type,
-                    ptr::null_mut(),
-                    data.as_mut_ptr().cast::<c_void>(),
-                    &mut size,
-                )
-            };
-            if status != ERROR_SUCCESS {
-                return None;
-            }
-            data.truncate(size as usize);
-            Some(data)
-        }
-    }
-
-    impl Drop for Key {
-        fn drop(&mut self) {
-            // SAFETY: the handle came from a successful RegOpenKeyExW and is closed only here.
-            unsafe {
-                RegCloseKey(self.0);
-            }
-        }
-    }
-
-    fn wide(value: &str) -> Vec<u16> {
-        value.encode_utf16().chain(std::iter::once(0)).collect()
-    }
-
-    /// Registry data is bytes; decode them without assuming alignment.
-    fn u16_units(data: &[u8]) -> Vec<u16> {
-        data.as_chunks::<2>()
-            .0
-            .iter()
-            .map(|pair| u16::from_le_bytes(*pair))
-            .collect()
-    }
-
-    fn present_owned(text: String) -> Option<String> {
-        let trimmed = text.trim();
-        (!trimmed.is_empty()).then(|| trimmed.to_owned())
     }
 }
 
