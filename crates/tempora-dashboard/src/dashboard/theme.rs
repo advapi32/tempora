@@ -40,6 +40,9 @@ pub(super) struct Tokens {
     pub shadow: egui::Shadow,
     /// The selected option of a segmented control or the nav.
     pub raised: egui::Shadow,
+    /// One color per category, in `Category::ALL` order. Neighbouring colors stay apart
+    /// for colour-blind viewers in that order, so stacked charts follow it.
+    categories: [Color32; Category::ALL.len()],
 }
 
 const DARK: Tokens = Tokens {
@@ -67,6 +70,17 @@ const DARK: Tokens = Tokens {
     scroll_thumb_hover: rgb(0x52525b),
     shadow: shadow([0, 8], 24, 128),
     raised: shadow([0, 1], 2, 80),
+    categories: [
+        rgb(0x338ced), // Games
+        rgb(0xe76624), // Browsers
+        rgb(0x00a888), // Media
+        rgb(0xd28e05), // Productivity
+        rgb(0xe24d8b), // Communication
+        rgb(0x0aac23), // Development
+        rgb(0x9887ef), // Creative
+        rgb(0xeb6263), // Utilities
+        rgb(0x71717a), // Other
+    ],
 };
 
 const LIGHT: Tokens = Tokens {
@@ -96,6 +110,18 @@ const LIGHT: Tokens = Tokens {
     // keep their edge from the border rather than from a dark halo.
     shadow: shadow([0, 4], 12, 20),
     raised: shadow([0, 1], 3, 22),
+    // Some of these sit below 3:1 against white; the chart's table view carries the values.
+    categories: [
+        rgb(0x257de0), // Games
+        rgb(0xf47230), // Browsers
+        rgb(0x00b894), // Media
+        rgb(0xf2a600), // Productivity
+        rgb(0xee7fac), // Communication
+        rgb(0x008a17), // Development
+        rgb(0x6a4ce2), // Creative
+        rgb(0xec4647), // Utilities
+        rgb(0x71717a), // Other
+    ],
 };
 
 const fn shadow(offset: [i8; 2], blur: u8, alpha: u8) -> egui::Shadow {
@@ -155,14 +181,11 @@ impl Tokens {
     }
 
     pub fn category(&self, category: Category) -> Color32 {
-        match category {
-            Category::Games => rgb(0x3b82f6),
-            Category::Browsers => rgb(0xf97316),
-            Category::Productivity => rgb(0x8b5cf6),
-            Category::Communication => rgb(0xec4899),
-            Category::Media => rgb(0x14b8a6),
-            Category::Other => rgb(0x71717a),
-        }
+        let index = Category::ALL
+            .iter()
+            .position(|item| *item == category)
+            .expect("Category::ALL lists every category");
+        self.categories[index]
     }
 
     pub fn medium(size: f32) -> FontId {

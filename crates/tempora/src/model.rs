@@ -14,17 +14,25 @@ pub enum Category {
     Communication,
     Media,
     Productivity,
+    Development,
+    Creative,
+    Utilities,
     #[default]
     Other,
 }
 
 impl Category {
-    pub const ALL: [Self; 6] = [
+    /// Display order, which is also the stacking order of charts. Each category's color is
+    /// chosen against its neighbours in this order, so keep the two in step.
+    pub const ALL: [Self; 9] = [
         Self::Games,
         Self::Browsers,
-        Self::Communication,
         Self::Media,
         Self::Productivity,
+        Self::Communication,
+        Self::Development,
+        Self::Creative,
+        Self::Utilities,
         Self::Other,
     ];
 
@@ -35,6 +43,9 @@ impl Category {
             Self::Communication => "Communication",
             Self::Media => "Media",
             Self::Productivity => "Productivity",
+            Self::Development => "Development",
+            Self::Creative => "Creative",
+            Self::Utilities => "Utilities",
             Self::Other => "Other",
         }
     }

@@ -1058,7 +1058,7 @@ mod tests {
             .map(|index| {
                 app(
                     &format!(r"exe:C:\Apps\app{index}.exe"),
-                    Category::ALL[index % 6],
+                    Category::ALL[index % Category::ALL.len()],
                 )
             })
             .collect();
