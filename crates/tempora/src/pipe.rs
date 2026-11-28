@@ -80,8 +80,19 @@ pub fn request(request: &ControlRequest) -> Result<ControlResponse, RequestError
 
 /// Sends a request that expects a plain `Ok`.
 pub fn command(command: &ControlRequest) -> Result<(), RequestError> {
-    match request(command)? {
-        ControlResponse::Ok => Ok(()),
+    command_changed(command).map(|_| ())
+}
+
+/// Sends a request and reports whether the recorder changed anything. A correction that saved
+/// nothing new answers `Unchanged`: still a success, but with no undo step to offer.
+pub fn command_changed(command: &ControlRequest) -> Result<bool, RequestError> {
+    changed_from_reply(request(command)?)
+}
+
+fn changed_from_reply(reply: ControlResponse) -> Result<bool, RequestError> {
+    match reply {
+        ControlResponse::Ok => Ok(true),
+        ControlResponse::Unchanged => Ok(false),
         ControlResponse::Error(error) => Err(RequestError::Refused(error)),
         ControlResponse::Status(_) => Err(RequestError::UnexpectedReply),
     }
@@ -92,7 +103,7 @@ pub fn status() -> Result<crate::model::RecorderStatus, RequestError> {
     match request(&ControlRequest::Status)? {
         ControlResponse::Status(status) => Ok(status),
         ControlResponse::Error(error) => Err(RequestError::Refused(error)),
-        ControlResponse::Ok => Err(RequestError::UnexpectedReply),
+        ControlResponse::Ok | ControlResponse::Unchanged => Err(RequestError::UnexpectedReply),
     }
 }
 
@@ -517,6 +528,19 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert_eq!(error.to_string(), "Invalid recorder message size");
+    }
+
+    #[test]
+    fn an_unchanged_reply_is_a_success_that_changed_nothing() {
+        assert!(matches!(changed_from_reply(ControlResponse::Ok), Ok(true)));
+        assert!(matches!(
+            changed_from_reply(ControlResponse::Unchanged),
+            Ok(false)
+        ));
+        assert!(matches!(
+            changed_from_reply(ControlResponse::Error("Refused".into())),
+            Err(RequestError::Refused(message)) if message == "Refused"
+        ));
     }
 
     #[test]

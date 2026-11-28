@@ -20,17 +20,9 @@ pub(super) fn prepare_observer(
     let qualified = store.qualified_keys()?;
     observer.remember(qualified.iter().cloned());
     observer.remember_fullscreen(store.fullscreen_keys().unwrap_or_default());
-    for key in qualified
-        .iter()
-        .filter(|key| AppKey::parse(key).package().is_some())
-    {
-        let Ok(Some((stored_name, _))) = store.automatic_identity(key) else {
-            continue;
-        };
-        if let Some(identity) = observer.reidentify_package(key, &stored_name) {
-            let _ = store.refresh_automatic(&identity.key, &identity.name, identity.category);
-        }
-    }
+    refresh_package_identities(store, &qualified, |key, name| {
+        observer.reidentify_package(key, name)
+    });
     // Settings can name executables with no history. Their Steam aliases need the same settings.
     let executable_keys = qualified
         .iter()
@@ -237,6 +229,27 @@ impl Host {
     }
 }
 
+/// Re-runs recognition for stored `package:` keys. Each key is recognized under its own stored
+/// name. The representative's name would come back as the fallback, and the refresh would write
+/// it onto a group member, which would then show under the group's name once ungrouped.
+fn refresh_package_identities(
+    store: &Store,
+    keys: &[String],
+    mut reidentify: impl FnMut(&str, &str) -> Option<AppIdentity>,
+) {
+    for key in keys
+        .iter()
+        .filter(|key| AppKey::parse(key).package().is_some())
+    {
+        let Ok(Some((stored_name, _))) = store.own_automatic_identity(key) else {
+            continue;
+        };
+        if let Some(identity) = reidentify(key, &stored_name) {
+            let _ = store.refresh_automatic(&identity.key, &identity.name, identity.category);
+        }
+    }
+}
+
 fn refresh_executable(store: &Store, key: &str, identity: &AppIdentity) -> Result<()> {
     if key == identity.key {
         let _ = store.refresh_automatic(key, &identity.name, identity.category);
@@ -384,6 +397,51 @@ mod tests {
         );
         assert!(store.undo_correction()?);
         assert_eq!(store.apps()?, [steam]);
+        Ok(())
+    }
+
+    #[test]
+    fn startup_refresh_keeps_a_group_member_under_its_own_name() -> Result<()> {
+        let store = Store::open_writer(Path::new(":memory:"))?;
+        let terminal = AppIdentity {
+            key: "package:microsoft.windowsterminal_8wekyb3d8bbwe!app".into(),
+            name: "Windows Terminal".into(),
+            category: Category::Other,
+        };
+        let editor = AppIdentity {
+            key: "package:editor_8wekyb3d8bbwe!app".into(),
+            name: "Editor".into(),
+            category: Category::Development,
+        };
+        let interval = |kind| Interval {
+            start_ms: 10,
+            end_ms: 20,
+            offset_seconds: 0,
+            kind,
+        };
+        store.record(&[
+            interval(IntervalKind::Focus(terminal.clone())),
+            interval(IntervalKind::Presence(editor.clone())),
+        ])?;
+        store.group_apps(&terminal.key, &editor.key)?;
+
+        // Recognition reports a new category and keeps whatever name it was handed.
+        refresh_package_identities(
+            &store,
+            &[terminal.key.clone(), editor.key.clone()],
+            |key, name| {
+                Some(AppIdentity {
+                    key: key.into(),
+                    name: name.into(),
+                    category: Category::Productivity,
+                })
+            },
+        );
+        store.ungroup_app(&terminal.key)?;
+        assert!(store.apps()?.contains(&AppIdentity {
+            category: Category::Productivity,
+            ..terminal
+        }));
         Ok(())
     }
 

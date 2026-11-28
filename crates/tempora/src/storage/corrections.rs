@@ -77,18 +77,38 @@ impl Store {
         Ok(())
     }
 
-    pub fn edit_app(&self, key: &str, name: &str, category: Category) -> Result<()> {
+    /// Saves only what differs from the automatic name and category. A field set back to its
+    /// automatic value loses its edit, so later recognition updates reach it again. Saving with
+    /// nothing changed records no correction. Returns whether a correction was recorded, so the
+    /// caller issues an undo token only for one.
+    pub fn edit_app(&self, key: &str, name: &str, category: Category) -> Result<bool> {
         let name = name.trim();
         ensure(!name.is_empty(), "App name cannot be empty")?;
+        let category = serde_json::to_string(&category)?;
         let tx = self.conn.unchecked_transaction()?;
         let key = effective_key(&tx, key)?.ok_or(StorageError::NotFound("App"))?;
+        let (automatic_name, automatic_category, edited_name, edited_category): (
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+        ) = tx.query_row(
+            "SELECT name, category, edited_name, edited_category FROM apps WHERE key = ?1",
+            [&key],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )?;
+        let new_name = (name != automatic_name).then(|| name.to_owned());
+        let new_category = (category != automatic_category).then_some(category);
+        if new_name == edited_name && new_category == edited_category {
+            return Ok(false);
+        }
         new_correction(&tx, &key, false, None)?;
         tx.execute(
             "UPDATE apps SET edited_name = ?1, edited_category = ?2 WHERE key = ?3",
-            params![name, serde_json::to_string(&category)?, key],
+            params![new_name, new_category, key],
         )?;
         tx.commit()?;
-        Ok(())
+        Ok(true)
     }
 
     /// Clears the name and category edits of an app in one undoable correction.
@@ -123,6 +143,24 @@ impl Store {
             [&key],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
+        Ok(Some((name, serde_json::from_str(&category)?)))
+    }
+
+    /// The automatic name and category stored on this key's own row. Unlike `automatic_identity`,
+    /// a group member gets its own values here, so refreshing a member cannot write the
+    /// representative's name onto it.
+    pub fn own_automatic_identity(&self, key: &str) -> Result<Option<(String, Category)>> {
+        let stored: Option<(String, String)> = self
+            .conn
+            .query_row(
+                "SELECT name, category FROM apps WHERE key = ?1",
+                [key],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((name, category)) = stored else {
+            return Ok(None);
+        };
         Ok(Some((name, serde_json::from_str(&category)?)))
     }
 

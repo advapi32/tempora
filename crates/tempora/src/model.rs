@@ -289,6 +289,9 @@ impl ControlRequest {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum ControlResponse {
     Ok,
+    /// An app correction that saved what was already stored. It recorded no undo step, so the
+    /// dashboard must not keep an undo token for it.
+    Unchanged,
     Status(RecorderStatus),
     Error(String),
 }

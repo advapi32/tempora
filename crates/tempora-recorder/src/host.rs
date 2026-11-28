@@ -274,6 +274,9 @@ impl Host {
             request => (request, None),
         };
         let is_correction = request.is_app_correction();
+        // A correction that changed nothing gets no undo token: undoing it would revert the
+        // previous, real correction.
+        let mut recorded = true;
         let result = match request {
             ControlRequest::Status => {
                 let now = Instant::now();
@@ -312,6 +315,7 @@ impl Host {
             } => self
                 .store
                 .edit_app(&key, &name, category)
+                .map(|created| recorded = created)
                 .map_err(Into::into),
             ControlRequest::GroupApps { source, target } => {
                 self.store.group_apps(&source, &target).map_err(Into::into)
@@ -362,13 +366,13 @@ impl Host {
         };
         match result {
             Ok(()) => {
-                if is_correction {
+                if is_correction && recorded {
                     match token {
                         Some(token) => self.undo_tokens.push(token),
                         None => self.undo_tokens.clear(),
                     }
                 }
-                ControlResponse::Ok
+                success_reply(is_correction, recorded)
             }
             Err(error) => ControlResponse::Error(error.to_string()),
         }
@@ -418,4 +422,29 @@ fn dashboard_window(pid: u32) -> Option<Window> {
     Window::top_level()
         .into_iter()
         .find(|window| window.process_id() == Some(pid) && window.is_visible())
+}
+
+/// The reply to a request that succeeded. A correction that recorded nothing answers
+/// `Unchanged`, so the dashboard keeps its undo stack rather than storing a token for it.
+fn success_reply(correction: bool, recorded: bool) -> ControlResponse {
+    if correction && !recorded {
+        ControlResponse::Unchanged
+    } else {
+        ControlResponse::Ok
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_correction_that_recorded_nothing_replies_unchanged() {
+        assert!(matches!(
+            success_reply(true, false),
+            ControlResponse::Unchanged
+        ));
+        assert!(matches!(success_reply(true, true), ControlResponse::Ok));
+        assert!(matches!(success_reply(false, true), ControlResponse::Ok));
+    }
 }
