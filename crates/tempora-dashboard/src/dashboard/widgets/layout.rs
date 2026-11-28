@@ -218,3 +218,94 @@ pub(in crate::dashboard) fn setting_row<R>(
     })
     .inner
 }
+
+/// Splits items of the given widths, in order, into rows no wider than `max_width`. Uses as few
+/// rows as plain wrapping would, but evens out their lengths, so a wrapped row of chips never
+/// leaves one straggler on a line of its own. Returns the index range of each row.
+pub(in crate::dashboard) fn balanced_rows(
+    widths: &[f32],
+    gap: f32,
+    max_width: f32,
+) -> Vec<std::ops::Range<usize>> {
+    let rows = wrap(widths, gap, max_width);
+    if rows.len() <= 1 {
+        return rows;
+    }
+    // The narrowest width that still fits in that many rows; wrapping at it evens them out.
+    let widest = widths.iter().copied().fold(0.0, f32::max);
+    let (mut low, mut high) = (widest, max_width.max(widest));
+    while high - low > 0.5 {
+        let middle = (low + high) / 2.0;
+        if wrap(widths, gap, middle).len() <= rows.len() {
+            high = middle;
+        } else {
+            low = middle;
+        }
+    }
+    wrap(widths, gap, high)
+}
+
+/// Plain greedy wrapping: each row takes items until the next one no longer fits.
+fn wrap(widths: &[f32], gap: f32, max_width: f32) -> Vec<std::ops::Range<usize>> {
+    let mut rows = Vec::new();
+    let mut start = 0;
+    let mut used = 0.0;
+    for (index, width) in widths.iter().enumerate() {
+        if index > start && used + gap + width > max_width {
+            rows.push(start..index);
+            start = index;
+            used = 0.0;
+        }
+        used += if index > start { gap } else { 0.0 } + width;
+    }
+    if start < widths.len() {
+        rows.push(start..widths.len());
+    }
+    rows
+}
+
+#[cfg(test)]
+mod balanced_rows_tests {
+    use super::balanced_rows;
+
+    fn lengths(rows: &[std::ops::Range<usize>]) -> Vec<usize> {
+        rows.iter().map(ExactSizeIterator::len).collect()
+    }
+
+    #[test]
+    fn items_that_fit_stay_on_one_row() {
+        assert_eq!(balanced_rows(&[100.0; 9], 8.0, 1000.0), vec![0..9]);
+        assert!(balanced_rows(&[], 8.0, 100.0).is_empty());
+    }
+
+    #[test]
+    fn a_single_straggler_is_evened_out() {
+        // Plain wrapping gives 8 + 1 here.
+        let rows = balanced_rows(&[100.0; 9], 8.0, 860.0);
+        assert_eq!(lengths(&rows), vec![5, 4]);
+    }
+
+    #[test]
+    fn rows_balance_by_width_not_count() {
+        // Two wide chips and seven narrow ones: the rows come out of similar length, not count.
+        let widths = [300.0, 300.0, 60.0, 60.0, 60.0, 60.0, 60.0, 60.0, 60.0];
+        let rows = balanced_rows(&widths, 8.0, 900.0);
+        let length = |row: &std::ops::Range<usize>| {
+            widths[row.clone()].iter().sum::<f32>() + 8.0 * (row.len() - 1) as f32
+        };
+        assert_eq!(rows.len(), 2);
+        assert!((length(&rows[0]) - length(&rows[1])).abs() <= 300.0);
+        let order: Vec<usize> = rows.iter().cloned().flatten().collect();
+        assert_eq!(order, (0..9).collect::<Vec<_>>(), "order is kept");
+    }
+
+    #[test]
+    fn never_more_rows_than_plain_wrapping() {
+        for max in [200.0, 350.0, 500.0, 860.0] {
+            let widths = [120.0, 90.0, 150.0, 80.0, 200.0, 70.0, 110.0, 95.0, 60.0];
+            let balanced = balanced_rows(&widths, 8.0, max);
+            let plain = super::wrap(&widths, 8.0, max);
+            assert_eq!(balanced.len(), plain.len(), "at {max}");
+        }
+    }
+}

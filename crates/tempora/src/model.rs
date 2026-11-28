@@ -22,8 +22,9 @@ pub enum Category {
 }
 
 impl Category {
-    /// Display order, which is also the stacking order of charts. Each category's color is
-    /// chosen against its neighbours in this order, so keep the two in step.
+    /// Display order, which is also the stacking order of charts. The dashboard's category
+    /// colors were chosen to stay apart from their neighbours in this order, so check them
+    /// again after reordering.
     pub const ALL: [Self; 9] = [
         Self::Games,
         Self::Browsers,

@@ -6,6 +6,26 @@ use egui_phosphor::regular as icons;
 
 use super::{Tokens, focus_ring, paint_focus_ring, wrapped_text};
 
+/// The width `category_chip` takes for this label and detail, for laying chips out first.
+pub(in crate::dashboard) fn category_chip_width(ui: &Ui, label: &str, detail: Option<&str>) -> f32 {
+    let measure = |text: &str, font: FontId| {
+        ui.painter()
+            .layout_no_wrap(text.into(), font, Color32::PLACEHOLDER)
+            .size()
+            .x
+    };
+    chip_width(
+        measure(label, FontId::proportional(Tokens::SECONDARY)),
+        detail.map(|detail| measure(detail, Tokens::mono(Tokens::SECONDARY))),
+    )
+}
+
+/// Padding, swatch, label and the optional detail, each separated by the control gap.
+fn chip_width(label: f32, detail: Option<f32>) -> f32 {
+    let gap = Tokens::CONTROL_GAP;
+    (12.0 + 10.0 + gap + label + detail.map_or(0.0, |detail| gap + detail) + 12.0).ceil()
+}
+
 /// Category filter chip: swatch, label and an optional mono duration. Chips that are not
 /// selected while another one is dim, matching the chart.
 pub(in crate::dashboard) fn category_chip(
@@ -31,13 +51,11 @@ pub(in crate::dashboard) fn category_chip(
         )
     });
     let gap = Tokens::CONTROL_GAP;
-    let width = 12.0
-        + 10.0
-        + gap
-        + text.size().x
-        + detail_text.as_ref().map_or(0.0, |text| gap + text.size().x)
-        + 12.0;
-    let (rect, response) = ui.allocate_exact_size(vec2(width.ceil(), height), Sense::click());
+    let width = chip_width(
+        text.size().x,
+        detail_text.as_ref().map(|text| text.size().x),
+    );
+    let (rect, response) = ui.allocate_exact_size(vec2(width, height), Sense::click());
     response.widget_info(|| {
         let label = match detail {
             Some(detail) => format!("{label}, {detail}"),

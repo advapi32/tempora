@@ -11,7 +11,7 @@ use tempora::{
 use crate::dashboard::nav::{Page, Period, View};
 use crate::dashboard::theme::{self, Tokens};
 use crate::dashboard::widgets::{
-    self, Button, ButtonKind, Column, Kpi, RowStyle, Segment, StackedBar, Width,
+    self, Button, ButtonKind, Column, Kpi, RowStyle, Segment, StackedBar, StatusKind, Width,
 };
 use crate::dashboard::{Dashboard, format};
 
@@ -259,6 +259,8 @@ impl Dashboard {
             .is_some_and(|status| status.settings.paused);
         let message = if paused {
             "Recording is paused. Resume to start collecting new activity."
+        } else if self.status_kind() == StatusKind::Connecting {
+            "Connecting to the recorder…"
         } else if self.recorder.is_none() {
             "Start the recorder to collect activity."
         } else {
@@ -315,9 +317,7 @@ impl Dashboard {
             widgets::section_header(
                 ui,
                 "Focused time by day",
-                Some(
-                    "Select a day to open its timeline, or drag across days to total them.                      Select a category to filter.",
-                ),
+                Some("Select a day to open its timeline, or drag across days to total them."),
                 |ui| {
                     widgets::segmented(ui, &mut table, &[(false, "Chart"), (true, "Table")]);
                 },
@@ -341,24 +341,44 @@ impl Dashboard {
         let colors = Tokens::get(ui);
         let selected = self.nav.view.category;
         let mut hovered = None;
-        ui.horizontal_wrapped(|ui| {
+        let durations: Vec<String> = vm
+            .chips
+            .iter()
+            .map(|(_, focused)| format::duration(*focused))
+            .collect();
+        let widths: Vec<f32> = vm
+            .chips
+            .iter()
+            .zip(&durations)
+            .map(|((category, _), duration)| {
+                widgets::category_chip_width(ui, category.label(), Some(duration))
+            })
+            .collect();
+        // Balanced rows: a wrap never strands one chip on a line of its own.
+        let rows = widgets::balanced_rows(&widths, Tokens::CONTROL_GAP, ui.available_width());
+        ui.vertical(|ui| {
             ui.spacing_mut().item_spacing = vec2(Tokens::CONTROL_GAP, Tokens::CONTROL_GAP);
-            for (category, focused) in &vm.chips {
-                let on = selected == Some(*category);
-                let chip = widgets::category_chip(
-                    ui,
-                    category.label(),
-                    colors.category(*category),
-                    Some(&format::duration(*focused)),
-                    on,
-                    selected.is_some(),
-                );
-                if chip.hovered() {
-                    hovered = Some(*category);
-                }
-                if chip.clicked() {
-                    self.nav.view.category = if on { None } else { Some(*category) };
-                }
+            for row in rows {
+                ui.horizontal(|ui| {
+                    for index in row {
+                        let (category, _) = vm.chips[index];
+                        let on = selected == Some(category);
+                        let chip = widgets::category_chip(
+                            ui,
+                            category.label(),
+                            colors.category(category),
+                            Some(&durations[index]),
+                            on,
+                            selected.is_some(),
+                        );
+                        if chip.hovered() {
+                            hovered = Some(category);
+                        }
+                        if chip.clicked() {
+                            self.nav.view.category = if on { None } else { Some(category) };
+                        }
+                    }
+                });
             }
         });
         hovered
@@ -632,7 +652,9 @@ fn day_table(ui: &mut Ui, vm: &OverviewVm, range_label: &str) -> Option<NaiveDat
     ));
     let labels: Vec<&str> = specs.iter().map(|column| column.label).collect();
     let mut opened = None;
-    let area = egui::ScrollArea::vertical()
+    // With many categories the columns outgrow a narrow window; the table then scrolls
+    // sideways instead of clipping the rightmost values and the total.
+    let area = egui::ScrollArea::both()
         .max_height(340.0)
         .id_salt("day-table");
     widgets::scroll(ui, area, |ui| {

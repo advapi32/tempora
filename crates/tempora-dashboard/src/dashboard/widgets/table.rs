@@ -39,8 +39,10 @@ pub(in crate::dashboard) struct Columns {
 pub(in crate::dashboard) const TABLE_GAP: f32 = 16.0;
 const CELL_PADDING: f32 = 12.0;
 
-/// Columns for a table whose rows sit in a vertical scroll area. The scroll bar takes a
-/// gutter on the right; rows laid out at the full width would push the card past the page.
+/// Columns for a table whose rows sit in a scroll area. The scroll bar takes a gutter on the
+/// right; rows laid out at the full width would push the card past the page. Columns never
+/// shrink below their minimum widths; a table that then outgrows `width` needs a scroll area
+/// that also scrolls horizontally.
 pub(in crate::dashboard) fn scrolled_columns(
     ui: &egui::Ui,
     width: f32,
@@ -48,7 +50,18 @@ pub(in crate::dashboard) fn scrolled_columns(
 ) -> Columns {
     let scroll = &ui.spacing().scroll;
     let gutter = scroll.bar_width + scroll.bar_inner_margin + scroll.bar_outer_margin;
-    columns(width - gutter, specs)
+    columns((width - gutter).max(min_width(specs)), specs)
+}
+
+/// The narrowest width that fits every column at its fixed or minimum width.
+pub(in crate::dashboard) fn min_width(specs: &[Column<'_>]) -> f32 {
+    let columns: f32 = specs
+        .iter()
+        .map(|column| match column.width {
+            Width::Fixed(width) | Width::Flex(_, width) => width,
+        })
+        .sum();
+    2.0 * CELL_PADDING + TABLE_GAP * specs.len().saturating_sub(1) as f32 + columns
 }
 
 pub(in crate::dashboard) fn columns(width: f32, specs: &[Column<'_>]) -> Columns {
