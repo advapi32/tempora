@@ -187,6 +187,7 @@ impl Store {
         migrate_product_aliases(&tx)?;
         migrate_v3(&tx)?;
         migrate_v4(&tx)?;
+        migrate_v5(&tx)?;
         tx.commit()?;
         Ok(Self { conn })
     }
@@ -1058,7 +1059,7 @@ mod tests {
             .map(|index| {
                 app(
                     &format!(r"exe:C:\Apps\app{index}.exe"),
-                    Category::ALL[index % 6],
+                    Category::ALL[index % Category::ALL.len()],
                 )
             })
             .collect();
@@ -1192,12 +1193,12 @@ mod tests {
     }
 
     #[test]
-    fn a_fresh_database_opens_at_version_four_with_the_new_columns() -> Result<()> {
+    fn a_fresh_database_opens_at_latest_version_with_the_new_columns() -> Result<()> {
         let store = Store::open_writer(Path::new(":memory:"))?;
         let version: u32 = store
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))?;
-        assert_eq!(version, 4);
+        assert_eq!(version, 5);
         let apps = column_names(&store, "apps")?;
         for column in ["fullscreen_seen", "fingerprint", "grouping"] {
             assert!(apps.iter().any(|name| name == column), "missing {column}");
@@ -1265,7 +1266,7 @@ mod tests {
         let version: u32 = store
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))?;
-        assert_eq!(version, 4);
+        assert_eq!(version, 5);
         assert_eq!(grouping(&store, "exe:b")?.as_deref(), Some("user"));
         assert_eq!(grouping(&store, "exe:a")?, None);
         assert!(
@@ -1345,6 +1346,142 @@ mod tests {
         let entry = app_report(&after, &edited.key);
         assert_eq!(entry.name, "Kept name");
         assert_eq!(entry.category, Category::Media);
+        Ok(())
+    }
+
+    #[test]
+    fn a_group_member_keeps_its_own_automatic_identity() -> Result<()> {
+        let store = Store::open_writer(Path::new(":memory:"))?;
+        let terminal = AppIdentity {
+            key: "package:microsoft.windowsterminal_8wekyb3d8bbwe!app".into(),
+            name: "Windows Terminal".into(),
+            category: Category::Other,
+        };
+        let editor = AppIdentity {
+            key: "package:editor_8wekyb3d8bbwe!app".into(),
+            name: "Editor".into(),
+            category: Category::Development,
+        };
+        let t = at(4, 3, 18);
+        store.record(&[
+            observation(t, t + HOUR, IntervalKind::Presence(terminal.clone())),
+            observation(t, t + HOUR, IntervalKind::Focus(editor.clone())),
+        ])?;
+        store.group_apps(&terminal.key, &editor.key)?;
+
+        // Reset to automatic resolves to the representative, while the member's row keeps its own.
+        assert_eq!(
+            store.automatic_identity(&terminal.key)?,
+            Some((editor.name.clone(), Category::Development))
+        );
+        assert_eq!(
+            store.own_automatic_identity(&terminal.key)?,
+            Some((terminal.name.clone(), Category::Other))
+        );
+        // A refresh that learns a new category keeps the member's name through ungrouping.
+        assert!(store.refresh_automatic(&terminal.key, &terminal.name, Category::Productivity)?);
+        store.ungroup_app(&terminal.key)?;
+        assert!(store.apps()?.contains(&AppIdentity {
+            category: Category::Productivity,
+            ..terminal
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn an_edit_keeps_only_what_differs_from_the_automatic_identity() -> Result<()> {
+        let store = Store::open_writer(Path::new(":memory:"))?;
+        let powerpoint = app(r"exe:c:\\office\\powerpnt.exe", Category::Other);
+        let t = at(4, 3, 18);
+        let range = dates(4, 3, 4, 3);
+        store.record(&[observation(
+            t,
+            t + HOUR,
+            IntervalKind::Focus(powerpoint.clone()),
+        )])?;
+        let edits = |store: &Store| -> Result<(Option<String>, Option<String>)> {
+            Ok(store.conn.query_row(
+                "SELECT edited_name, edited_category FROM apps WHERE key = ?1",
+                [&powerpoint.key],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?)
+        };
+
+        // Only the category changes; the name shown in the dialog is not saved as an edit.
+        store.edit_app(&powerpoint.key, &powerpoint.name, Category::Productivity)?;
+        assert_eq!(edits(&store)?.0, None);
+        assert!(store.refresh_automatic(&powerpoint.key, "PowerPoint", Category::Other)?);
+        let entry = app_report(
+            &store.report(range, chrono_tz::UTC, false)?,
+            &powerpoint.key,
+        )
+        .clone();
+        assert_eq!(entry.name, "PowerPoint", "automatic renames still arrive");
+        assert_eq!(entry.category, Category::Productivity);
+
+        // Saving again unchanged records nothing to undo.
+        let events = correction_events(&store)?;
+        assert!(
+            !store.edit_app(&powerpoint.key, "PowerPoint", Category::Productivity)?,
+            "an unchanged save reports no correction, so it gets no undo token"
+        );
+        assert_eq!(correction_events(&store)?, events);
+
+        // Setting the category back to automatic clears that edit.
+        store.edit_app(&powerpoint.key, "Slides", Category::Other)?;
+        assert_eq!(edits(&store)?, (Some("Slides".into()), None));
+        Ok(())
+    }
+
+    #[test]
+    fn migration_drops_edits_that_repeat_the_automatic_identity() -> Result<()> {
+        let store = Store::open_writer(Path::new(":memory:"))?;
+        let game = app(r"exe:d:\\games\\game.exe", Category::Games);
+        let t = at(4, 3, 18);
+        store.record(&[observation(t, t + HOUR, IntervalKind::Focus(game.clone()))])?;
+        store.conn.execute(
+            "UPDATE apps SET edited_name = name, edited_category = '\"Media\"' WHERE key = ?1",
+            [&game.key],
+        )?;
+        store.conn.pragma_update(None, "user_version", 4)?;
+        migrate_v5(&store.conn)?;
+        let edits: (Option<String>, Option<String>) = store.conn.query_row(
+            "SELECT edited_name, edited_category FROM apps WHERE key = ?1",
+            [&game.key],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert_eq!(edits, (None, Some("\"Media\"".into())));
+        Ok(())
+    }
+
+    #[test]
+    fn migration_cleans_saved_undo_states_too() -> Result<()> {
+        let store = Store::open_writer(Path::new(":memory:"))?;
+        let tool = app(r"exe:d:\\tools\\tool.exe", Category::Other);
+        let t = at(4, 3, 18);
+        store.record(&[observation(t, t + HOUR, IntervalKind::Focus(tool.clone()))])?;
+        // An old rename-only edit, saved with the automatic category alongside it, then a later
+        // edit that keeps it in the undo state.
+        store.conn.execute(
+            "UPDATE apps SET edited_name = 'Renamed', edited_category = category WHERE key = ?1",
+            [&tool.key],
+        )?;
+        store.edit_app(&tool.key, "Renamed again", Category::Media)?;
+        store.conn.pragma_update(None, "user_version", 4)?;
+        migrate_v5(&store.conn)?;
+
+        assert!(store.refresh_automatic(&tool.key, &tool.name, Category::Development)?);
+        assert!(store.undo_correction()?);
+        let edits: (Option<String>, Option<String>) = store.conn.query_row(
+            "SELECT edited_name, edited_category FROM apps WHERE key = ?1",
+            [&tool.key],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert_eq!(
+            edits,
+            (Some("Renamed".into()), None),
+            "the undo keeps the newly recognized category"
+        );
         Ok(())
     }
 

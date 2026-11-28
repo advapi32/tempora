@@ -492,23 +492,19 @@ impl Dashboard {
     }
 
     fn recorder_banner(&mut self, ui: &mut Ui) {
-        if self.recorder_error.is_some() {
-            let enabled = self.recorder_startup.is_none();
+        // While the recorder is starting, the status pill says so; the error would only flash.
+        if self.recorder_error.is_some() && self.recorder_startup.is_none() {
             let clicked = widgets::banner(
                 ui,
                 BannerKind::Error,
                 "Can't reach the recorder.",
-                if enabled {
-                    "Recorded history is available but won't update. Settings changes are disabled until it's running."
-                } else {
-                    "Waiting for the recorder to connect…"
-                },
+                "Recorded history is available but won't update. Settings changes are disabled until it's running.",
                 &[
                     (
                         Button::new("Retry", ButtonKind::Secondary),
-                        enabled && !self.status_pending,
+                        !self.status_pending,
                     ),
-                    (Button::new("Start recorder", ButtonKind::Primary), enabled),
+                    (Button::new("Start recorder", ButtonKind::Primary), true),
                 ],
             );
             match clicked {
@@ -928,6 +924,68 @@ fn lanes_mark(painter: &egui::Painter, rect: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn shell_texts(ctx: &Context, dashboard: &mut Dashboard) -> Vec<String> {
+        fn collect(shape: &egui::Shape, out: &mut Vec<String>) {
+            match shape {
+                egui::Shape::Text(text) => out.push(text.galley.text().to_owned()),
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| collect(shape, out)),
+                _ => {}
+            }
+        }
+        let input = || egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                vec2(1100.0, 720.0),
+            )),
+            ..egui::RawInput::default()
+        };
+        ctx.run_ui(input(), |ui| dashboard.draw_shell(ui))
+            .textures_delta
+            .clear();
+        let mut output = ctx.run_ui(input(), |ui| dashboard.draw_shell(ui));
+        output.textures_delta.clear();
+        let mut out = Vec::new();
+        for clipped in &output.shapes {
+            collect(&clipped.shape, &mut out);
+        }
+        out
+    }
+
+    #[test]
+    fn starting_the_recorder_shows_connecting_instead_of_an_error() {
+        let ctx = egui::Context::default();
+        let mut dashboard = Dashboard::for_test(&ctx);
+        // The first status said the recorder isn't running, and the dashboard started it.
+        // Marking the first status as seen keeps the test from launching a real recorder.
+        ctx.data_mut(|data| data.insert_temp(egui::Id::new(FIRST_STATUS_SEEN), true));
+        dashboard.recorder_error = Some(tempora::pipe::RequestError::NotRunning);
+        let now = Instant::now();
+        dashboard.recorder_startup = Some(RecorderStartup {
+            deadline: now + START_TIMEOUT,
+            next_check: now + START_TIMEOUT,
+            quiet: true,
+        });
+
+        let starting = shell_texts(&ctx, &mut dashboard);
+        assert!(
+            !starting.iter().any(|text| text.contains("Can't reach")),
+            "{starting:?}"
+        );
+        assert!(
+            starting.iter().any(|text| text.contains("Connecting")),
+            "{starting:?}"
+        );
+
+        dashboard.recorder_startup = None;
+        let failed = shell_texts(&ctx, &mut dashboard);
+        assert!(
+            failed
+                .iter()
+                .any(|text| text == "Can't reach the recorder."),
+            "the error shows once the start gives up: {failed:?}"
+        );
+    }
 
     #[test]
     fn timeline_opens_a_day_in_the_selected_range_while_its_report_loads() {

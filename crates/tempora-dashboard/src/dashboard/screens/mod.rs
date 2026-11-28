@@ -623,6 +623,135 @@ mod render_tests {
     }
 
     #[test]
+    fn the_daily_table_scrolls_sideways_to_every_category_at_the_narrowest_window() {
+        let ctx = Context::default();
+        let mut dashboard = Dashboard::for_test(&ctx);
+        dashboard.recorder = Some(status(true));
+        dashboard.nav.view.overview_table = true;
+        let key = (dashboard.nav.view.range, dashboard.nav.view.exclude_idle);
+        let mut report = report(&dashboard);
+        let every = |ms| {
+            Category::ALL
+                .iter()
+                .map(|category| CategorySummary {
+                    category: *category,
+                    totals: Totals {
+                        focused_ms: ms,
+                        running_ms: ms,
+                        ..Totals::default()
+                    },
+                })
+                .collect::<Vec<_>>()
+        };
+        report.categories = every(HOUR);
+        for day in &mut report.days {
+            day.categories = every(HOUR / 4);
+        }
+        dashboard.report.finish(key, Ok(Arc::new(report)));
+        let size = [1100.0, 1600.0];
+        let output = frame(&ctx, &mut dashboard, size);
+        for category in Category::ALL {
+            assert!(has(&output, category.label()), "{category:?} column");
+        }
+        let total = |output: &FullOutput| {
+            text_rects(output, "Total")
+                .into_iter()
+                .max_by(|a, b| a.left().total_cmp(&b.left()))
+                .expect("Total header")
+        };
+        let day = text_rects(&output, "Day")[0];
+        let before = total(&output);
+        assert!(
+            before.right() > size[0] - 32.0,
+            "nine categories outgrow the narrowest window: Total at {before:?}"
+        );
+
+        // A sideways wheel over the table, as from Shift and the wheel or a touchpad.
+        let pointer = pos2(day.left() + 200.0, day.center().y + 40.0);
+        let events = vec![
+            egui::Event::PointerMoved(pointer),
+            egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: vec2(-2000.0, 0.0),
+                phase: egui::TouchPhase::Move,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ];
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(size[0], size[1]))),
+            events,
+            ..egui::RawInput::default()
+        };
+        let _ = ctx.run_ui(input, |ui| dashboard.draw_shell(ui));
+        let output = frame(&ctx, &mut dashboard, size);
+        let after = total(&output);
+        assert!(
+            after.left() < before.left() && after.right() < size[0] - 32.0,
+            "scrolling brings Total into view: {before:?} -> {after:?}"
+        );
+    }
+
+    #[test]
+    fn category_chips_wrap_into_balanced_rows_and_fit_one_row_on_a_wide_screen() {
+        const MINUTE: i64 = 60_000;
+        // A real week: all nine categories, durations from 2m to 8h 43m.
+        let week = [
+            (Category::Games, 523),
+            (Category::Browsers, 472),
+            (Category::Media, 21),
+            (Category::Productivity, 75),
+            (Category::Communication, 317),
+            (Category::Development, 4),
+            (Category::Creative, 2),
+            (Category::Utilities, 5),
+            (Category::Other, 21),
+        ];
+        for (width, expected_rows) in [(1100.0, Some(2)), (1440.0, None), (2560.0, Some(1))] {
+            let ctx = Context::default();
+            let mut dashboard = Dashboard::for_test(&ctx);
+            dashboard.recorder = Some(status(true));
+            let key = (dashboard.nav.view.range, dashboard.nav.view.exclude_idle);
+            let mut report = report(&dashboard);
+            report.categories = week
+                .iter()
+                .map(|(category, minutes)| CategorySummary {
+                    category: *category,
+                    totals: Totals {
+                        focused_ms: minutes * MINUTE,
+                        running_ms: minutes * MINUTE,
+                        ..Totals::default()
+                    },
+                })
+                .collect();
+            dashboard.report.finish(key, Ok(Arc::new(report)));
+            let output = frame(&ctx, &mut dashboard, [width, 1600.0]);
+            // Each chip's label is the topmost text with its name.
+            let mut rows: Vec<(f32, usize)> = Vec::new();
+            for (category, _) in week {
+                let top = text_rects(&output, category.label())
+                    .into_iter()
+                    .map(|rect| rect.center().y)
+                    .fold(f32::INFINITY, f32::min);
+                match rows.iter_mut().find(|(y, _)| (*y - top).abs() < 4.0) {
+                    Some((_, count)) => *count += 1,
+                    None => rows.push((top, 1)),
+                }
+            }
+            let counts: Vec<usize> = rows.iter().map(|(_, count)| *count).collect();
+            if let Some(expected) = expected_rows {
+                assert_eq!(counts.len(), expected, "rows at {width}: {counts:?}");
+            }
+            if counts.len() > 1 {
+                let (fewest, most) = (counts.iter().min(), counts.iter().max());
+                assert!(
+                    fewest.zip(most).is_some_and(|(f, m)| m - f <= 2 && *f > 1),
+                    "balanced rows at {width}: {counts:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn month_chart_shows_the_daily_total_in_each_slice_tooltip() {
         use crate::dashboard::widgets::{self, Segment, StackedBar};
 

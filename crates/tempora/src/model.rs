@@ -14,17 +14,26 @@ pub enum Category {
     Communication,
     Media,
     Productivity,
+    Development,
+    Creative,
+    Utilities,
     #[default]
     Other,
 }
 
 impl Category {
-    pub const ALL: [Self; 6] = [
+    /// Display order, which is also the stacking order of charts. The dashboard's category
+    /// colors were chosen to stay apart from their neighbours in this order, so check them
+    /// again after reordering.
+    pub const ALL: [Self; 9] = [
         Self::Games,
         Self::Browsers,
-        Self::Communication,
         Self::Media,
         Self::Productivity,
+        Self::Communication,
+        Self::Development,
+        Self::Creative,
+        Self::Utilities,
         Self::Other,
     ];
 
@@ -35,6 +44,9 @@ impl Category {
             Self::Communication => "Communication",
             Self::Media => "Media",
             Self::Productivity => "Productivity",
+            Self::Development => "Development",
+            Self::Creative => "Creative",
+            Self::Utilities => "Utilities",
             Self::Other => "Other",
         }
     }
@@ -278,6 +290,9 @@ impl ControlRequest {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum ControlResponse {
     Ok,
+    /// An app correction that saved what was already stored. It recorded no undo step, so the
+    /// dashboard must not keep an undo token for it.
+    Unchanged,
     Status(RecorderStatus),
     Error(String),
 }

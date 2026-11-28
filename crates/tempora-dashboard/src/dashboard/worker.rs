@@ -85,6 +85,8 @@ pub(super) enum Update {
 #[derive(Clone, Copy, PartialEq)]
 pub(super) enum ControlKind {
     Correction(Option<u64>),
+    /// A correction the recorder saved nothing for. It has no undo step to offer.
+    Unchanged,
     Undo,
     Settings,
     Other,
@@ -100,6 +102,15 @@ impl ControlKind {
             }
             ControlRequest::SetSettings(_) => Self::Settings,
             _ => Self::Other,
+        }
+    }
+
+    /// The kind once the recorder has answered. A correction that changed nothing is `Unchanged`:
+    /// undoing it would revert the previous, real correction, so it gets no undo token.
+    fn settled(self, changed: bool) -> Self {
+        match self {
+            Self::Correction(_) if !changed => Self::Unchanged,
+            kind => kind,
         }
     }
 }
@@ -201,7 +212,10 @@ impl Worker {
             }
             Job::Control(command, success) => {
                 let kind = ControlKind::of(&command);
-                Update::Done(kind, control(&command).map(|()| success))
+                match pipe::command_changed(&command) {
+                    Ok(changed) => Update::Done(kind.settled(changed), Ok(success)),
+                    Err(error) => Update::Done(kind, Err(error.to_string())),
+                }
             }
             Job::Export(path, range, exclude) => Update::Exported(self.store().and_then(|store| {
                 store
@@ -485,6 +499,23 @@ fn delete_preview(store: &Store, key: Option<&str>, zone: Tz) -> Result<DeletePr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_correction_that_changed_nothing_settles_as_unchanged() {
+        assert!(matches!(
+            ControlKind::Correction(Some(7)).settled(false),
+            ControlKind::Unchanged
+        ));
+        assert!(matches!(
+            ControlKind::Correction(None).settled(false),
+            ControlKind::Unchanged
+        ));
+        assert!(matches!(
+            ControlKind::Correction(Some(7)).settled(true),
+            ControlKind::Correction(Some(7))
+        ));
+        assert!(matches!(ControlKind::Undo.settled(true), ControlKind::Undo));
+    }
 
     #[test]
     fn delete_previews_show_app_running_time_and_overall_focused_time() -> anyhow::Result<()> {

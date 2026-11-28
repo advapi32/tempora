@@ -118,14 +118,13 @@ impl WindowsObserver {
     }
 
     /// Re-runs recognition for a stored `package:` key from its AUMID or family. Returns the
-    /// identity only when it is the same app and changes the stored name or category.
-    pub fn reidentify_package(&mut self, key: &str) -> Option<AppIdentity> {
+    /// identity only when it is the same app and changes the stored name or category. The stored
+    /// automatic name stays when the shell has none, so a category-only change keeps it.
+    pub fn reidentify_package(&mut self, key: &str, stored_name: &str) -> Option<AppIdentity> {
         let package = AppKey::parse(key).package()?;
-        // The stored name was the executable's stem or the package itself; neither is known
-        // here, so an unchanged lookup compares equal to this fallback and returns nothing.
         let fallback = AppIdentity {
             key: key.to_owned(),
-            name: package.to_owned(),
+            name: stored_name.to_owned(),
             category: Category::Other,
         };
         let identity = self.recognizer.identify_package(package, fallback.clone());
@@ -523,6 +522,16 @@ mod tests {
         observer.qualify(primary.clone());
         assert!(has_window_evidence(&observer.qualified, &primary));
         assert!(!has_window_evidence(&observer.qualified, &helper));
+    }
+
+    #[test]
+    fn a_category_only_package_refresh_keeps_the_stored_name() {
+        let mut observer = WindowsObserver::new().unwrap();
+        // A family-only key skips the shell lookup; the embedded catalog knows its category.
+        let key = "package:microsoft.windowsterminal_8wekyb3d8bbwe";
+        let identity = observer.reidentify_package(key, "Terminal").unwrap();
+        assert_eq!(identity.name, "Terminal");
+        assert_eq!(identity.category, Category::Development);
     }
 
     #[test]

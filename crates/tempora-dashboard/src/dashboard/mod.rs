@@ -513,6 +513,8 @@ impl Dashboard {
                                     self.undo_stack.push(token);
                                     Some("Undo")
                                 }
+                                // Nothing was recorded, so the undo stack stays as it is.
+                                ControlKind::Unchanged => None,
                                 ControlKind::Undo => {
                                     self.undo_stack.pop();
                                     (!self.undo_stack.is_empty()).then_some("Undo previous")
@@ -750,6 +752,75 @@ mod tests {
             next_command().is_none(),
             "pre-session corrections stay untouched"
         );
+    }
+
+    #[test]
+    fn an_unchanged_correction_keeps_the_undo_of_the_last_real_one() {
+        use tempora::model::Category;
+
+        let ctx = egui::Context::default();
+        let mut dashboard = Dashboard::for_test(&ctx);
+        dashboard.recorder = Some(RecorderStatus {
+            settings: Settings::default(),
+            candidates: Vec::new(),
+            problem: None,
+            recording: false,
+            capabilities: vec![CAPABILITY_TRACKED_UNDO.into()],
+        });
+        let (send, jobs) = mpsc::channel();
+        dashboard.jobs = send;
+        let (updates, receive) = mpsc::channel();
+        dashboard.updates = receive;
+        let next_command = || {
+            jobs.try_iter().find_map(|job| match job {
+                Job::Control(command, _) => Some(command),
+                _ => None,
+            })
+        };
+
+        dashboard.action(
+            ControlRequest::ResetApp {
+                key: "steam:1".into(),
+            },
+            "App reset",
+        );
+        let Some(ControlRequest::TrackCorrection { token: real, .. }) = next_command() else {
+            panic!("app correction should be tracked");
+        };
+        updates
+            .send(Update::Done(
+                ControlKind::Correction(Some(real)),
+                Ok("App reset"),
+            ))
+            .unwrap();
+        dashboard.receive(&ctx);
+
+        // The recorder saved nothing for this edit, so the save offers no undo of its own.
+        dashboard.action(
+            ControlRequest::EditApp {
+                key: "steam:1".into(),
+                name: "Same".into(),
+                category: Category::Games,
+            },
+            "App updated",
+        );
+        assert!(matches!(
+            next_command(),
+            Some(ControlRequest::TrackCorrection { .. })
+        ));
+        updates
+            .send(Update::Done(ControlKind::Unchanged, Ok("App updated")))
+            .unwrap();
+        dashboard.receive(&ctx);
+        let toast = dashboard.toast.as_ref().unwrap();
+        assert_eq!(toast.message, "App updated");
+        assert_eq!(toast.undo, None);
+
+        dashboard.undo();
+        assert!(matches!(
+            next_command(),
+            Some(ControlRequest::UndoTrackedCorrection { token }) if token == real
+        ));
     }
 
     #[test]

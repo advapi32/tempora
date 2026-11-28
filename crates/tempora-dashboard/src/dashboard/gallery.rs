@@ -783,8 +783,11 @@ mod tests {
                 output
                     .shapes
                     .iter()
+                    // Each theme has its own shade; both themes' specimens are drawn.
                     .filter(|paint| matches!(&paint.shape, egui::Shape::Rect(rect)
-                        if rect.fill == Tokens::for_dark(true).category(Category::Communication)
+                        if [true, false].iter().any(|dark| {
+                            rect.fill == Tokens::for_dark(*dark).category(Category::Communication)
+                        })
                         && rect.corner_radius.nw == 4 && (rect.rect.width() - 46.0).abs() <= 1.0
                     ))
                     .count(),

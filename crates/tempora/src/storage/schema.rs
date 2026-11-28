@@ -146,3 +146,25 @@ pub(super) fn migrate_v4(conn: &Connection) -> Result<()> {
     }
     Ok(())
 }
+
+/// Edits used to save the name and category together. Drops the half that only repeats the
+/// automatic value, so recognition updates reach it again. Saved undo states get the same
+/// treatment, or undoing an earlier edit would bring a repeated value back.
+///
+/// A saved undo state holds no record of the automatic values when it was taken, so it is
+/// compared with the current ones: a repeat whose automatic value has changed since stays.
+pub(super) fn migrate_v5(conn: &Connection) -> Result<()> {
+    let version: u32 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if version == 4 {
+        conn.execute_batch(
+            "UPDATE apps SET edited_name = NULL WHERE edited_name = name;
+             UPDATE apps SET edited_category = NULL WHERE edited_category = category;
+             UPDATE correction_undo SET edited_name = NULL
+              WHERE edited_name = (SELECT name FROM apps WHERE key = correction_undo.app_key);
+             UPDATE correction_undo SET edited_category = NULL
+              WHERE edited_category = (SELECT category FROM apps WHERE key = correction_undo.app_key);",
+        )?;
+        conn.pragma_update(None, "user_version", 5)?;
+    }
+    Ok(())
+}

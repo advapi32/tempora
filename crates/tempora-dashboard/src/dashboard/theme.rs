@@ -40,6 +40,21 @@ pub(super) struct Tokens {
     pub shadow: egui::Shadow,
     /// The selected option of a segmented control or the nav.
     pub raised: egui::Shadow,
+    categories: CategoryColors,
+}
+
+/// One color per category. Each was chosen to stay apart from its neighbours in
+/// `Category::ALL` for colour-blind viewers, so check them again after reordering it.
+struct CategoryColors {
+    games: Color32,
+    browsers: Color32,
+    communication: Color32,
+    media: Color32,
+    productivity: Color32,
+    development: Color32,
+    creative: Color32,
+    utilities: Color32,
+    other: Color32,
 }
 
 const DARK: Tokens = Tokens {
@@ -67,6 +82,17 @@ const DARK: Tokens = Tokens {
     scroll_thumb_hover: rgb(0x52525b),
     shadow: shadow([0, 8], 24, 128),
     raised: shadow([0, 1], 2, 80),
+    categories: CategoryColors {
+        games: rgb(0x338ced),
+        browsers: rgb(0xe76624),
+        media: rgb(0x00a888),
+        productivity: rgb(0xd28e05),
+        communication: rgb(0xe24d8b),
+        development: rgb(0x0aac23),
+        creative: rgb(0x9887ef),
+        utilities: rgb(0xeb6263),
+        other: rgb(0x71717a),
+    },
 };
 
 const LIGHT: Tokens = Tokens {
@@ -96,6 +122,18 @@ const LIGHT: Tokens = Tokens {
     // keep their edge from the border rather than from a dark halo.
     shadow: shadow([0, 4], 12, 20),
     raised: shadow([0, 1], 3, 22),
+    // Some of these sit below 3:1 against white; the chart's table view carries the values.
+    categories: CategoryColors {
+        games: rgb(0x257de0),
+        browsers: rgb(0xf47230),
+        media: rgb(0x00b894),
+        productivity: rgb(0xf2a600),
+        communication: rgb(0xee7fac),
+        development: rgb(0x008a17),
+        creative: rgb(0x6a4ce2),
+        utilities: rgb(0xec4647),
+        other: rgb(0x71717a),
+    },
 };
 
 const fn shadow(offset: [i8; 2], blur: u8, alpha: u8) -> egui::Shadow {
@@ -109,7 +147,7 @@ const fn shadow(offset: [i8; 2], blur: u8, alpha: u8) -> egui::Shadow {
 
 impl Tokens {
     pub const WINDOW_MIN: [f32; 2] = [1100.0, 720.0];
-    pub const CONTENT_MAX: f32 = 1320.0;
+    pub const CONTENT_MAX: f32 = 1440.0;
     pub const WIDE_CONTENT: f32 = 1280.0;
     pub const PAGE_PADDING: i8 = 32;
     pub const CARD_PADDING: i8 = 16;
@@ -155,13 +193,17 @@ impl Tokens {
     }
 
     pub fn category(&self, category: Category) -> Color32 {
+        let colors = &self.categories;
         match category {
-            Category::Games => rgb(0x3b82f6),
-            Category::Browsers => rgb(0xf97316),
-            Category::Productivity => rgb(0x8b5cf6),
-            Category::Communication => rgb(0xec4899),
-            Category::Media => rgb(0x14b8a6),
-            Category::Other => rgb(0x71717a),
+            Category::Games => colors.games,
+            Category::Browsers => colors.browsers,
+            Category::Communication => colors.communication,
+            Category::Media => colors.media,
+            Category::Productivity => colors.productivity,
+            Category::Development => colors.development,
+            Category::Creative => colors.creative,
+            Category::Utilities => colors.utilities,
+            Category::Other => colors.other,
         }
     }
 
